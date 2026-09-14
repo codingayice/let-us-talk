@@ -22,6 +22,10 @@ async function mockChatApi(page: Page) {
     nora: [],
   };
 
+  await page.route("**/api/auth/get-session", (route) => route.fulfill({ json: {
+    session: { id: "test-session" },
+    user: { id: "test-user", email: "test@example.com", name: "测试用户", image: null },
+  } }));
   await page.route("**/api/characters", (route) => route.fulfill({ json: characters }));
   await page.route("**/api/conversations/*", (route) => {
     const characterId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
@@ -74,6 +78,7 @@ test("a late response from another contact does not leak into the current chat",
   await page.goto("/");
 
   const editor = page.locator('[contenteditable="true"]');
+  await expect(editor).toBeEditable();
   await editor.fill("只给 Momo 的消息");
   await page.locator(".cs-button--send").click();
   await page.locator('[data-character-id="loki"]').click();
@@ -120,6 +125,7 @@ test("a failed message can be retried without duplicating it", async ({ page }) 
   await page.goto("/");
 
   const editor = page.locator('[contenteditable="true"]');
+  await expect(editor).toBeEditable();
   await editor.fill("网络失败后重试");
   await page.locator(".cs-button--send").click();
   await expect(page.getByRole("alert")).toContainText("服务暂时不可用，请重试");
@@ -150,7 +156,9 @@ test("a network failure explains what to do next", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.locator('[contenteditable="true"]').fill("网络故障测试");
+  const editor = page.locator('[contenteditable="true"]');
+  await expect(editor).toBeEditable();
+  await editor.fill("网络故障测试");
   await page.locator(".cs-button--send").click();
   await expect(page.getByRole("alert")).toContainText("网络连接失败，请稍后重试");
   await page.getByRole("button", { name: "重试发送" }).click();
@@ -178,7 +186,9 @@ test("sending disables duplicate submission and clearly reports progress", async
   });
   await page.goto("/");
 
-  await page.locator('[contenteditable="true"]').fill("不要重复发送");
+  const editor = page.locator('[contenteditable="true"]');
+  await expect(editor).toBeEditable();
+  await editor.fill("不要重复发送");
   await page.locator(".cs-button--send").click();
   await expect(page.getByRole("status")).toContainText("正在等待 Momo 回复");
   await expect(page.locator(".cs-button--send")).toBeDisabled();
@@ -197,4 +207,23 @@ test("about explains the AI identity and MVP limitations outside the chat", asyn
   await expect(dialog).toContainText("实验性质");
   await expect(dialog).toContainText("MVP 限制");
   await expect(page.locator(".cs-conversation-header")).not.toContainText("AI 角色");
+});
+
+test("auth form uses custom validation and Chinese login errors", async ({ page }) => {
+  await page.route("**/api/auth/get-session", (route) => route.fulfill({ json: null }));
+  await page.route("**/api/auth/sign-in/email", (route) => route.fulfill({
+    status: 401,
+    json: { code: "INVALID_EMAIL_OR_PASSWORD", message: "Invalid email or password" },
+  }));
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "欢迎回来" }).click();
+  await expect(page.getByText("请输入有效的邮箱地址")).toBeVisible();
+  await expect(page.getByText("请输入密码")).toBeVisible();
+  await expect(page.getByLabel("邮箱")).toHaveAttribute("aria-invalid", "true");
+
+  await page.getByLabel("邮箱").fill("user@example.com");
+  await page.getByLabel("密码").fill("password123");
+  await page.getByRole("button", { name: "欢迎回来" }).click();
+  await expect(page.getByRole("alert")).toHaveText("邮箱或密码错误");
 });
