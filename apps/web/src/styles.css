@@ -79,6 +79,9 @@ button, textarea { font: inherit; }
 .im-clear-button:hover:not(:disabled) { color: #51483e; background: #f3efe9; }
 .im-clear-button:disabled, .im-error button:disabled { cursor: wait; opacity: .55; }
 .im-error { display: flex; align-items: center; gap: 10px; margin: 12px 24px 0; padding: 10px 12px; border: 1px solid #e6b8ae; border-radius: 8px; color: #9a4637; background: #fff2ef; font-size: 12px; }
+.im-task-state { display: flex; align-items: center; gap: 10px; margin: 8px 24px 0; padding: 9px 12px; border: 1px solid #e6ded2; border-radius: 8px; color: #8a7762; background: #fbf7f1; font-size: 12px; }
+.im-task-state[role="alert"] { border-color: #e6b8ae; color: #9a4637; background: #fff2ef; }
+.im-task-state button { margin-left: auto; padding: 5px 9px; border: 0; border-radius: 6px; cursor: pointer; color: #8d3d30; background: #f9dcd6; font-size: 11px; }
 .im-error button { margin-left: auto; padding: 5px 9px; border-radius: 6px; color: #8d3d30; background: #f9dcd6; font-size: 11px; }
 .im-send-status { min-height: 18px; padding: 4px 25px 0; color: #a49b91; font-size: 11px; }
 .im-chat-container .cs-message-list { padding: 25px 30px; background: #fffdfa; }

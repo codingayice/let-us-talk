@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { Character, ChatMessage, ChatResponse, ConversationSummary } from "@let-us-talk/shared";
+import type { Character, ChatMessage, ChatResponse, ChatTask, ConversationSummary } from "@let-us-talk/shared";
 import { io, type Socket } from "socket.io-client";
 import {
   Avatar,
@@ -21,6 +21,7 @@ interface RetryRequest {
 }
 
 interface RealtimeCompleted {
+  eventId?: string;
   conversationId: string;
   messageId: string;
   userMessage: ChatMessage;
@@ -28,10 +29,19 @@ interface RealtimeCompleted {
 }
 
 interface RealtimeFailed {
+  eventId?: string;
   conversationId: string;
   messageId: string;
   userMessage: ChatMessage;
+  task?: ChatTask;
   error: string;
+}
+
+interface OutboxItem {
+  characterId: string;
+  conversationId: string;
+  content: string;
+  messageId: string;
 }
 
 interface AuthUser {
@@ -61,7 +71,7 @@ function userFacingError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content: string; messageId: string }) {
+function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content: string; messageId: string }, seenEventIds: Set<string>) {
   return new Promise<ChatResponse>((resolve, reject) => {
     let acknowledged = false;
     const cleanup = () => {
@@ -71,11 +81,15 @@ function sendRealtimeMessage(socket: Socket, payload: { characterId: string; con
     };
     const onCompleted = (event: RealtimeCompleted) => {
       if (!acknowledged || event.messageId !== payload.messageId) return;
+      if (event.eventId && seenEventIds.has(event.eventId)) return;
+      if (event.eventId) seenEventIds.add(event.eventId);
       cleanup();
       resolve({ userMessage: event.userMessage, assistantMessage: event.assistantMessage });
     };
     const onFailed = (event: RealtimeFailed) => {
       if (!acknowledged || event.messageId !== payload.messageId) return;
+      if (event.eventId && seenEventIds.has(event.eventId)) return;
+      if (event.eventId) seenEventIds.add(event.eventId);
       cleanup();
       reject(new Error(event.error));
     };
@@ -95,6 +109,27 @@ function sendRealtimeMessage(socket: Socket, payload: { characterId: string; con
       acknowledged = true;
     });
   });
+}
+
+function outboxKey(userId: string) {
+  return `let-us-talk:outbox:${userId}`;
+}
+
+function readOutbox(userId: string): OutboxItem[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(outboxKey(userId)) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed as OutboxItem[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeOutbox(userId: string, items: OutboxItem[]) {
+  localStorage.setItem(outboxKey(userId), JSON.stringify(items));
+}
+
+function matchesClientMessage(message: ChatMessage, messageId: string) {
+  return message.id === messageId || message.clientMessageId === messageId;
 }
 
 function localizeAuthError(data: { code?: string; message?: string; error?: string }) {
@@ -118,6 +153,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState("momo");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [tasks, setTasks] = useState<ChatTask[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingConversation, setLoadingConversation] = useState(false);
@@ -131,8 +167,13 @@ export function App() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState("");
   const selectedIdRef = useRef(selectedId);
+  const selectedConversationIdRef = useRef(selectedConversationId);
   const socketRef = useRef<Socket | null>(null);
+  const seenEventIdsRef = useRef(new Set<string>());
+  const outboxRef = useRef<OutboxItem[]>([]);
+  const loadedConversationKeyRef = useRef("");
   selectedIdRef.current = selectedId;
+  selectedConversationIdRef.current = selectedConversationId;
 
   const selected = useMemo(
     () => characters.find((character) => character.id === selectedId) ?? fallbackCharacters[0],
@@ -159,6 +200,12 @@ export function App() {
   }, [authUser]);
 
   useEffect(() => {
+    const socket = socketRef.current;
+    if (!authUser || !socket?.connected || !selectedConversationId) return;
+    socket.emit("conversation:join", { conversationId: selectedConversationId, characterId: selectedId });
+  }, [authUser, selectedConversationId, selectedId]);
+
+  useEffect(() => {
     if (!authUser) return;
     void fetch("/api/conversations")
       .then(async (response) => {
@@ -171,9 +218,34 @@ export function App() {
 
   useEffect(() => {
     if (!authUser) return;
+    outboxRef.current = readOutbox(authUser.id);
+    seenEventIdsRef.current.clear();
+    loadedConversationKeyRef.current = "";
+    setTasks([]);
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
     const socket = io({ withCredentials: true });
     socketRef.current = socket;
+    const recover = () => {
+      const conversationId = selectedConversationIdRef.current;
+      if (!conversationId) return;
+      socket.emit("conversation:join", { conversationId, characterId: selectedIdRef.current });
+      void fetch(`/api/conversations/by-id/${conversationId}`)
+        .then((response) => response.ok ? response.json() as Promise<{ messages?: ChatMessage[]; tasks?: ChatTask[] }> : undefined)
+        .then((data) => {
+          if (data) {
+            setMessages(data.messages ?? []);
+            setTasks(data.tasks ?? []);
+          }
+        })
+        .catch(() => undefined);
+    };
+    socket.on("connect", recover);
+    if (socket.connected) recover();
     return () => {
+      socket.off("connect", recover);
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
@@ -181,6 +253,8 @@ export function App() {
 
   useEffect(() => {
     if (!authUser) return;
+    const conversationKey = `${selectedId}:${selectedConversationId ?? "contact"}`;
+    if (loadedConversationKeyRef.current === conversationKey) return;
     setMessages([]);
     setErrorMessage("");
     setRetryRequest(null);
@@ -192,12 +266,26 @@ export function App() {
     void fetch(endpoint)
       .then(async (response) => {
         if (!response.ok) throw new Error("历史消息加载失败");
-        return response.json() as Promise<{ conversation?: { id: string }; messages?: ChatMessage[] }>;
+        return response.json() as Promise<{ conversation?: { id: string }; messages?: ChatMessage[]; tasks?: ChatTask[] }>;
       })
       .then((data) => {
         if (!cancelled) {
+          loadedConversationKeyRef.current = `${selectedId}:${data.conversation?.id ?? selectedConversationId ?? "contact"}`;
           setSelectedConversationId(data.conversation?.id ?? selectedConversationId);
-          setMessages(data.messages ?? []);
+          const serverMessages = data.messages ?? [];
+          const serverTasks = data.tasks ?? [];
+          const reconciledOutbox = outboxRef.current.filter((item) => {
+            const serverMessage = serverMessages.find((message) => matchesClientMessage(message, item.messageId));
+            return !serverMessage || !serverTasks.some((task) => task.userMessageId === serverMessage.id && task.status === "completed");
+          });
+          outboxRef.current = reconciledOutbox;
+          writeOutbox(authUser.id, reconciledOutbox);
+          setMessages([...serverMessages, ...outboxRef.current
+            .filter((item) => item.conversationId === data.conversation?.id && !serverMessages.some((message) => matchesClientMessage(message, item.messageId)))
+            .map((item): ChatMessage => ({ id: item.messageId, clientMessageId: item.messageId, role: "user", content: item.content, createdAt: new Date().toISOString(), status: "failed" }))]);
+          setTasks(serverTasks);
+          const recoverable = outboxRef.current.find((item) => item.conversationId === data.conversation?.id);
+          if (recoverable) setRetryRequest({ content: recoverable.content, messageId: recoverable.messageId });
         }
       })
       .catch((error: unknown) => {
@@ -209,7 +297,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [authUser, selectedId]);
+  }, [authUser, selectedId, selectedConversationId]);
 
   async function refreshConversationSummaries() {
     const response = await fetch("/api/conversations");
@@ -234,6 +322,7 @@ export function App() {
     await fetch("/api/auth/sign-out", { method: "POST" });
     setAuthUser(null);
     setMessages([]);
+    setTasks([]);
   }
 
   function openProfile() {
@@ -286,14 +375,23 @@ export function App() {
       role: "user",
       content,
       createdAt: new Date().toISOString(),
+      status: "pending",
     };
-    setMessages((current) => [...current, userMessage]);
+    const outboxItem: OutboxItem = {
+      characterId: requestCharacterId,
+      conversationId: requestConversationId ?? "",
+      content,
+      messageId: userMessage.id,
+    };
+    outboxRef.current = [...outboxRef.current.filter((item) => item.messageId !== userMessage.id), outboxItem];
+    if (authUser) writeOutbox(authUser.id, outboxRef.current);
+    setMessages((current) => [...current.filter((message) => !matchesClientMessage(message, userMessage.id)), userMessage]);
 
     try {
       let data: ChatResponse;
       const socket = socketRef.current;
       if (socket?.connected && requestConversationId) {
-        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, content, messageId: userMessage.id });
+        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, content, messageId: userMessage.id }, seenEventIdsRef.current);
       } else {
         const response = await fetch("/api/chat", {
           method: "POST",
@@ -306,17 +404,20 @@ export function App() {
         }
         data = (await response.json()) as ChatResponse;
       }
+      outboxRef.current = outboxRef.current.filter((item) => item.messageId !== userMessage.id);
+      if (authUser) writeOutbox(authUser.id, outboxRef.current);
       if (selectedIdRef.current !== requestCharacterId) return;
       setRetryRequest(null);
       setMessages((current) => [
-        ...current.filter((message) => message.id !== userMessage.id),
+        ...current.filter((message) => !matchesClientMessage(message, userMessage.id)),
         data.userMessage,
         data.assistantMessage,
       ]);
+      setTasks((current) => current.filter((task) => task.userMessageId !== data.userMessage.id && task.userMessageId !== userMessage.id));
       void refreshConversationSummaries().catch(() => undefined);
     } catch (error) {
       if (selectedIdRef.current !== requestCharacterId) return;
-      setMessages((current) => current.filter((message) => message.id !== userMessage.id));
+      setMessages((current) => current.map((message) => matchesClientMessage(message, userMessage.id) ? { ...message, status: "failed" } : message));
       setDraft(content);
       setRetryRequest({ content, messageId: userMessage.id });
       setErrorMessage(userFacingError(error, "网络连接失败，请稍后重试"));
@@ -336,6 +437,7 @@ export function App() {
       const response = await fetch(`/api/conversations/${requestCharacterId}`, { method: "DELETE" });
       if (!response.ok) throw new Error("会话清空失败，请稍后重试");
       if (selectedIdRef.current === requestCharacterId) setMessages([]);
+      if (selectedIdRef.current === requestCharacterId) setTasks([]);
       void refreshConversationSummaries().catch(() => undefined);
     } catch (error) {
       if (selectedIdRef.current === requestCharacterId) {
@@ -344,6 +446,12 @@ export function App() {
     } finally {
       setClearing(false);
     }
+  }
+
+  function retryTask(task: ChatTask) {
+    const userMessage = messages.find((message) => message.id === task.userMessageId);
+    const messageId = userMessage?.clientMessageId ?? userMessage?.id;
+    if (userMessage && messageId) void sendMessage(userMessage.content, messageId);
   }
 
   if (authLoading) {
@@ -479,12 +587,27 @@ export function App() {
                 )}
               </div>
             )}
+            {!loadingConversation && !errorMessage && retryRequest && (
+              <div className="im-task-state" role="alert">
+                <span>有一条消息尚未完成对账</span>
+                <button type="button" onClick={() => void sendMessage(retryRequest.content, retryRequest.messageId)} disabled={sending}>重试发送</button>
+              </div>
+            )}
             {(sending || clearing) && (
               <div className="im-send-status" role="status" aria-live="polite">
                 {sending ? `正在等待 ${selected.name} 回复…` : "正在清空当前会话…"}
               </div>
             )}
             {loadingConversation && <div className="im-loading-state">正在加载历史消息…</div>}
+            {!loadingConversation && tasks.filter((task) => task.status !== "completed").map((task) => {
+              const taskMessage = messages.find((message) => message.id === task.userMessageId);
+              return (
+                <div className="im-task-state" key={task.id} data-task-id={task.id} role={task.status === "failed" ? "alert" : "status"}>
+                  <span>{task.status === "waiting" ? "AI 回复排队中…" : task.status === "processing" ? "AI 正在处理中…" : `AI 回复失败：${task.error ?? "请重试"}`}</span>
+                  {task.status === "failed" && taskMessage && <button type="button" onClick={() => retryTask(task)} disabled={sending}>重试回复</button>}
+                </div>
+              );
+            })}
             {!loadingConversation && messages.length === 0 && (
               <div className="im-empty-state">
                 <img src={avatarSource(selected)} alt="" />

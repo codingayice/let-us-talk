@@ -1,10 +1,27 @@
 export type ChatRole = "user" | "assistant";
 
+export type UserMessageStatus = "pending" | "confirmed" | "sent" | "failed";
+export type AssistantMessageStatus = "waiting" | "processing" | "completed" | "failed";
+export type ChatMessageStatus = UserMessageStatus | AssistantMessageStatus;
+
 export interface ChatMessage {
   id: string;
+  clientMessageId?: string;
   role: ChatRole;
   content: string;
   createdAt: string;
+  status: ChatMessageStatus;
+}
+
+export interface ChatTask {
+  id: string;
+  conversationId: string;
+  userMessageId: string;
+  status: AssistantMessageStatus;
+  attempts: number;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Character {
@@ -50,4 +67,5 @@ export interface ConversationSummary {
 export interface ConversationDetails {
   conversation: Conversation;
   messages: ChatMessage[];
+  tasks: ChatTask[];
 }

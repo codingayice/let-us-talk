@@ -83,9 +83,10 @@ test("chat:send confirms persistence before starting the model and emits a compl
     const beforeReply = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie } })).body) as { messages: ChatMessage[] };
     assert.deepEqual(beforeReply.messages.map((message) => message.content), ["你好"]);
 
-    const completed = waitForEvent<{ assistantMessage: ChatMessage }>(socket, "chat:completed");
+    const completed = waitForEvent<{ eventId: string; assistantMessage: ChatMessage }>(socket, "chat:completed");
     deferred.release();
     const result = await completed;
+    assert.match(result.eventId, /^[0-9a-f-]{36}$/);
     assert.equal(result.assistantMessage.content, "Fake reply to: 你好");
     const afterReply = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie } })).body) as { messages: ChatMessage[] };
     assert.deepEqual(afterReply.messages.map((message) => message.content), ["你好", "Fake reply to: 你好"]);

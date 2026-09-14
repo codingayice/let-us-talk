@@ -3,13 +3,14 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 import { fromNodeHeaders } from "better-auth/node";
 import { z } from "zod";
-import type { ChatRequest, ChatResponse, ConversationDetails, ConversationSummary, PublicCharacter } from "@let-us-talk/shared";
+import type { ChatRequest, ConversationSummary, PublicCharacter } from "@let-us-talk/shared";
 import { type AuthInstance } from "./auth.js";
 import { characters, findCharacter } from "./characters.js";
 import { type ChatModel } from "./model.js";
 import { createStore, type ChatStore } from "./store.js";
+import { ChatService, ChatServiceError } from "./chat-service.js";
 
-interface AppDependencies { chatModel: ChatModel; store: ChatStore; auth: AuthInstance }
+interface AppDependencies { chatModel: ChatModel; store: ChatStore; auth: AuthInstance; chatService?: ChatService }
 
 export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyInstance {
   const store = dependencies.store ?? createStore();
@@ -18,6 +19,7 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
   if (!chatModel) throw new Error("A chat model is required");
   if (!authInstance) throw new Error("An auth instance is required");
   const auth = authInstance;
+  const chatService = dependencies.chatService ?? new ChatService(store, chatModel);
 
   const app = Fastify({ logger: true });
   void app.register(cors, { origin: true, credentials: true });
@@ -125,26 +127,20 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
       ? store.getConversationById(user.id, parsed.data.conversationId)
       : store.getConversation(user.id, character.id);
     if (!conversationDetails || conversationDetails.conversation.characterId !== character.id) return reply.code(404).send({ error: "Conversation not found" });
-    const conversation = conversationDetails.messages;
-    const messageId = parsed.data.messageId ?? crypto.randomUUID();
-    const existingUserIndex = conversation.findIndex((message) => message.id === messageId);
-    const existingUserMessage = conversation[existingUserIndex];
-    const existingAssistantMessage = conversation[existingUserIndex + 1];
-    if (existingUserMessage?.role === "user" && existingAssistantMessage?.role === "assistant") return { userMessage: existingUserMessage, assistantMessage: existingAssistantMessage };
-    const userMessage = existingUserMessage?.role === "user"
-      ? existingUserMessage
-      : { id: messageId, role: "user" as const, content: parsed.data.content, createdAt: new Date().toISOString() };
+    const clientMessageId = parsed.data.messageId ?? crypto.randomUUID();
     try {
-      if (!existingUserMessage) store.saveMessage(user.id, character.id, userMessage, parsed.data.conversationId);
-      const assistantContent = (await chatModel.reply({ systemPrompt: character.systemPrompt, messages: [...conversation.filter((message) => message.id !== userMessage.id), userMessage] })).trim();
-      if (!assistantContent) throw new Error("Chat model returned an empty response");
-      const assistantMessage = { id: crypto.randomUUID(), role: "assistant" as const, content: assistantContent, createdAt: new Date().toISOString() };
-      store.saveMessage(user.id, character.id, assistantMessage, parsed.data.conversationId);
-      const response: ChatResponse = { userMessage, assistantMessage };
-      return response;
+      return await chatService.submit({
+        userId: user.id,
+        characterId: character.id,
+        conversationId: conversationDetails.conversation.id,
+        content: parsed.data.content,
+        clientMessageId,
+        systemPrompt: character.systemPrompt,
+      });
     } catch (error) {
       request.log.error(error, "chat model request failed");
-      return reply.code(502).send({ error: "AI 暂时不可用，请稍后再试" });
+      const statusCode = error instanceof ChatServiceError ? error.statusCode : 502;
+      return reply.code(statusCode).send({ error: error instanceof Error ? error.message : "AI 暂时不可用，请稍后再试" });
     }
   });
 
