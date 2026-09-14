@@ -736,6 +736,7 @@ export function App() {
             <div className="im-settings-panel">
               <div className="im-section-title">设置</div>
               <div className="im-settings-user"><strong>{authUser.name}</strong><span>{authUser.email}</span></div>
+              {errorMessage && !mobileChatOpen && <div className="im-error im-settings-error" role="alert"><span>{errorMessage}</span></div>}
               <ModelSettings onConfigChange={onModelConfigChange} />
               <button type="button" className="im-settings-action" onClick={openProfile}>账号资料</button>
               <button type="button" className="im-settings-action" onClick={openPasswordManagement}>密码管理</button>

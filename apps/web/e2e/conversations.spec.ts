@@ -174,6 +174,7 @@ test("sending without a local model configuration is blocked before chat history
   await page.goto("/");
   await page.evaluate(() => localStorage.removeItem("let-us-talk:model-config:v1"));
   await page.reload();
+  await page.locator('[data-character-id="momo"]').click();
   const editor = page.locator('[contenteditable="true"]');
   await editor.fill("未配置时不应发送");
   await page.locator(".cs-button--send").click();
