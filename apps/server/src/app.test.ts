@@ -19,6 +19,22 @@ function createFakeModel() {
   return { calls, model };
 }
 
+function createFlakyModel() {
+  let shouldFail = true;
+  const calls: string[] = [];
+  const model: ChatModel = {
+    async reply(input) {
+      calls.push(input.messages.at(-1)?.content ?? "");
+      if (shouldFail) {
+        shouldFail = false;
+        throw new Error("model unavailable");
+      }
+      return `Recovered reply to: ${input.messages.at(-1)?.content}`;
+    },
+  };
+  return { calls, model };
+}
+
 function sessionCookie(response: { headers: { "set-cookie"?: unknown } }) {
   const value = response.headers["set-cookie"];
   const header = Array.isArray(value) ? value[0] : value;
@@ -71,6 +87,129 @@ test("chat API returns and persists a complete ordered conversation", async () =
       { role: "user", content: "你好" },
       { role: "assistant", content: "Fake reply to: 你好" },
     ]);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("health check reports that the service is available", async () => {
+  const store = createStore(":memory:");
+  const app = buildApp({ store, chatModel: createFakeModel().model });
+
+  try {
+    const response = await app.inject({ method: "GET", url: "/health" });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(response.body), { ok: true });
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("clearing one conversation preserves another contact's history", async () => {
+  const store = createStore(":memory:");
+  const { model } = createFakeModel();
+  const app = buildApp({ store, chatModel: model });
+
+  try {
+    const cookie = sessionCookie(await app.inject({ method: "GET", url: "/api/conversations/momo" }));
+    for (const [characterId, content] of [["momo", "只清除我"], ["loki", "保留我"]]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/chat",
+        headers: { cookie },
+        payload: { characterId, content },
+      });
+      assert.equal(response.statusCode, 200);
+    }
+
+    const cleared = await app.inject({
+      method: "DELETE",
+      url: "/api/conversations/momo",
+      headers: { cookie },
+    });
+    assert.equal(cleared.statusCode, 200);
+    assert.deepEqual(JSON.parse(cleared.body), { ok: true });
+
+    const momoHistory = await app.inject({
+      method: "GET",
+      url: "/api/conversations/momo",
+      headers: { cookie },
+    });
+    const lokiHistory = await app.inject({
+      method: "GET",
+      url: "/api/conversations/loki",
+      headers: { cookie },
+    });
+    assert.deepEqual(JSON.parse(momoHistory.body).messages, []);
+    assert.equal(JSON.parse(lokiHistory.body).messages.length, 2);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("a failed model request is not persisted and can be retried without duplicates", async () => {
+  const store = createStore(":memory:");
+  const { model, calls } = createFlakyModel();
+  const app = buildApp({ store, chatModel: model });
+
+  try {
+    const cookie = sessionCookie(await app.inject({ method: "GET", url: "/api/conversations/momo" }));
+    const failed = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      headers: { cookie },
+      payload: { characterId: "momo", content: "请再试一次" },
+    });
+    assert.equal(failed.statusCode, 502);
+
+    const retried = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      headers: { cookie },
+      payload: { characterId: "momo", content: "请再试一次" },
+    });
+    assert.equal(retried.statusCode, 200);
+    assert.deepEqual(calls, ["请再试一次", "请再试一次"]);
+
+    const history = await app.inject({
+      method: "GET",
+      url: "/api/conversations/momo",
+      headers: { cookie },
+    });
+    assert.deepEqual(
+      JSON.parse(history.body).messages.map(({ role, content }: ChatMessage) => ({ role, content })),
+      [
+        { role: "user", content: "请再试一次" },
+        { role: "assistant", content: "Recovered reply to: 请再试一次" },
+      ],
+    );
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("repeating a completed request with the same message id is idempotent", async () => {
+  const store = createStore(":memory:");
+  const { model, calls } = createFakeModel();
+  const app = buildApp({ store, chatModel: model });
+
+  try {
+    const cookie = sessionCookie(await app.inject({ method: "GET", url: "/api/conversations/momo" }));
+    const payload = { characterId: "momo", content: "只保存一次", messageId: crypto.randomUUID() };
+    const first = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload });
+    const second = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload });
+
+    assert.equal(first.statusCode, 200);
+    assert.equal(second.statusCode, 200);
+    assert.deepEqual(JSON.parse(second.body), JSON.parse(first.body));
+    assert.equal(calls.length, 1);
+
+    const history = await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie } });
+    assert.equal(JSON.parse(history.body).messages.length, 2);
   } finally {
     await app.close();
     store.close();

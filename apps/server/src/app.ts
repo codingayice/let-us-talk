@@ -76,6 +76,7 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
   const chatSchema = z.object({
     characterId: z.string().min(1),
     content: z.string().trim().min(1).max(4000),
+    messageId: z.string().uuid().optional(),
   });
 
   app.post<{ Body: ChatRequest }>("/api/chat", async (request, reply) => {
@@ -90,14 +91,22 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     }
 
     const userId = getUserId(request, reply);
+    const conversation = store.getConversation(userId, character.id);
+    const messageId = parsed.data.messageId ?? crypto.randomUUID();
+    const existingUserIndex = conversation.findIndex((message) => message.id === messageId);
+    const existingUserMessage = conversation[existingUserIndex];
+    const existingAssistantMessage = conversation[existingUserIndex + 1];
+    if (existingUserMessage?.role === "user" && existingAssistantMessage?.role === "assistant") {
+      return { userMessage: existingUserMessage, assistantMessage: existingAssistantMessage };
+    }
+
     const userMessage = {
-      id: crypto.randomUUID(),
+      id: messageId,
       role: "user" as const,
       content: parsed.data.content,
       createdAt: new Date().toISOString(),
     };
-    const history = [...store.getConversation(userId, character.id), userMessage];
-    store.saveMessage(userId, character.id, userMessage);
+    const history = [...conversation, userMessage];
 
     try {
       const assistantContent = (await chatModel.reply({
@@ -108,6 +117,7 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
         throw new Error("Chat model returned an empty response");
       }
 
+      store.saveMessage(userId, character.id, userMessage);
       const assistantMessage = {
         id: crypto.randomUUID(),
         role: "assistant" as const,

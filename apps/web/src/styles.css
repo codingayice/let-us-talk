@@ -27,11 +27,19 @@ button, textarea { font: inherit; }
 .im-sidebar .cs-conversation__info { max-width: 180px; color: #a29a90; font-size: 12px; }
 .im-sidebar .cs-avatar { width: 40px; height: 40px; }
 .im-sidebar-footer { margin-top: auto; padding: 18px 22px; color: #b0a99f; font-size: 11px; }
+.im-about-button { padding: 5px 0; border: 0; cursor: pointer; color: #a49c91; background: transparent; font-size: 11px; }
+.im-about-button:hover { color: #51483e; background: #f3efe9; }
 .im-chat-container { background: #fffdfa; }
 .im-chat-container .cs-conversation-header { min-height: 76px; padding: 14px 25px; border-bottom: 1px solid #ebe7df; background: #fffdfa; }
 .im-chat-container .cs-conversation-header__user-name { color: #332f2a; font-size: 15px; font-weight: 700; }
 .im-chat-container .cs-conversation-header__info { margin-top: 4px; color: #a29a90; font-size: 12px; }
-.im-error { margin: 12px 24px 0; padding: 10px 12px; border: 1px solid #e6b8ae; border-radius: 8px; color: #9a4637; background: #fff2ef; font-size: 12px; }
+.im-clear-button, .im-error button, .im-about-heading button { border: 0; cursor: pointer; }
+.im-clear-button { padding: 7px 10px; border: 1px solid #e2ddd5; border-radius: 7px; color: #827a70; background: transparent; font-size: 11px; }
+.im-clear-button:hover:not(:disabled) { color: #51483e; background: #f3efe9; }
+.im-clear-button:disabled, .im-error button:disabled { cursor: wait; opacity: .55; }
+.im-error { display: flex; align-items: center; gap: 10px; margin: 12px 24px 0; padding: 10px 12px; border: 1px solid #e6b8ae; border-radius: 8px; color: #9a4637; background: #fff2ef; font-size: 12px; }
+.im-error button { margin-left: auto; padding: 5px 9px; border-radius: 6px; color: #8d3d30; background: #f9dcd6; font-size: 11px; }
+.im-send-status { min-height: 18px; padding: 4px 25px 0; color: #a49b91; font-size: 11px; }
 .im-chat-container .cs-message-list { padding: 25px 30px; background: #fffdfa; }
 .im-chat-container .cs-message--incoming .cs-message__content { color: #4d4841; background: #f0ede7; }
 .im-chat-container .cs-message--outgoing .cs-message__content { color: #fff; background: #3c3832; }
@@ -46,6 +54,16 @@ button, textarea { font: inherit; }
 .im-empty-state strong { color: #514a42; font-family: Georgia, serif; font-size: 21px; font-weight: 500; }
 .im-empty-state span { margin-top: 7px; font-size: 12px; }
 .im-loading-state { display: grid; place-items: center; height: 100%; min-height: 300px; color: #aaa198; font-size: 13px; }
+.im-modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 24px; background: rgba(47, 41, 34, .28); }
+.im-about-dialog { width: min(460px, 100%); padding: 25px; border: 1px solid #ded8cf; border-radius: 16px; background: #fffdfa; box-shadow: 0 24px 80px rgba(47, 41, 34, .2); }
+.im-about-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.im-dialog-kicker { color: #b08b60; font-size: 10px; font-weight: 700; letter-spacing: .14em; }
+.im-about-heading h2 { margin: 7px 0 0; color: #38322b; font-family: Georgia, serif; font-size: 24px; font-weight: 500; }
+.im-about-heading button { width: 28px; height: 28px; border-radius: 50%; color: #8d857b; background: #f0ece6; font-size: 20px; line-height: 1; }
+.im-about-copy { margin-top: 24px; color: #6f675e; font-size: 13px; line-height: 1.7; }
+.im-about-copy h3 { margin: 17px 0 3px; color: #4d453d; font-size: 12px; }
+.im-about-copy h3:first-child { margin-top: 0; }
+.im-about-copy p { margin: 0; }
 
 @media (max-width: 720px) {
   .im-app { padding: 0; }

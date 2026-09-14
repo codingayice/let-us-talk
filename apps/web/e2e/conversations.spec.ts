@@ -25,6 +25,9 @@ async function mockChatApi(page: Page) {
   await page.route("**/api/characters", (route) => route.fulfill({ json: characters }));
   await page.route("**/api/conversations/*", (route) => {
     const characterId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    if (route.request().method() === "DELETE") {
+      histories[characterId] = [];
+    }
     return route.fulfill({ json: { messages: histories[characterId] ?? [] } });
   });
   await page.route("**/api/chat", async (route) => {
@@ -80,4 +83,118 @@ test("a late response from another contact does not leak into the current chat",
   releaseMomoResponse();
   await responsePromise;
   await expect(page.getByText("Momo 延迟回复")).toHaveCount(0);
+});
+
+test("clearing the current conversation shows the empty state without clearing another contact", async ({ page }) => {
+  await mockChatApi(page);
+  await page.goto("/");
+
+  await expect(page.getByText("Momo 历史消息")).toBeVisible();
+  await page.getByRole("button", { name: "清空当前会话" }).click();
+  await expect(page.getByText("开始和 Momo 聊天")).toBeVisible();
+  await expect(page.getByText("Momo 历史消息")).toHaveCount(0);
+
+  await page.locator('[data-character-id="loki"]').click();
+  await expect(page.getByText("Loki 历史消息")).toBeVisible();
+});
+
+test("a failed message can be retried without duplicating it", async ({ page }) => {
+  let attempts = 0;
+  const messageIds: string[] = [];
+  await mockChatApi(page);
+  await page.unroute("**/api/chat");
+  await page.route("**/api/chat", async (route) => {
+    attempts += 1;
+    const body = route.request().postDataJSON() as { characterId: string; content: string; messageId: string };
+    messageIds.push(body.messageId);
+    if (attempts === 1) {
+      await route.fulfill({ status: 503, json: { error: "服务暂时不可用，请重试" } });
+      return;
+    }
+    const response = [
+      message(body.characterId, "user", body.content),
+      message(body.characterId, "assistant", "重试成功"),
+    ];
+    await route.fulfill({ json: { userMessage: response[0], assistantMessage: response[1] } });
+  });
+  await page.goto("/");
+
+  const editor = page.locator('[contenteditable="true"]');
+  await editor.fill("网络失败后重试");
+  await page.locator(".cs-button--send").click();
+  await expect(page.getByRole("alert")).toContainText("服务暂时不可用，请重试");
+  await page.getByRole("button", { name: "重试发送" }).click();
+
+  await expect(page.getByText("重试成功")).toBeVisible();
+  await expect(page.getByText("网络失败后重试", { exact: true })).toHaveCount(1);
+  expect(attempts).toBe(2);
+  expect(messageIds[0]).toBe(messageIds[1]);
+});
+
+test("a network failure explains what to do next", async ({ page }) => {
+  let attempts = 0;
+  await mockChatApi(page);
+  await page.unroute("**/api/chat");
+  await page.route("**/api/chat", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.abort("failed");
+      return;
+    }
+    const body = route.request().postDataJSON() as { characterId: string; content: string };
+    const response = [
+      message(body.characterId, "user", body.content),
+      message(body.characterId, "assistant", "网络恢复后的回复"),
+    ];
+    await route.fulfill({ json: { userMessage: response[0], assistantMessage: response[1] } });
+  });
+  await page.goto("/");
+
+  await page.locator('[contenteditable="true"]').fill("网络故障测试");
+  await page.locator(".cs-button--send").click();
+  await expect(page.getByRole("alert")).toContainText("网络连接失败，请稍后重试");
+  await page.getByRole("button", { name: "重试发送" }).click();
+  await expect(page.getByText("网络恢复后的回复")).toBeVisible();
+  expect(attempts).toBe(2);
+});
+
+test("sending disables duplicate submission and clearly reports progress", async ({ page }) => {
+  let releaseResponse!: () => void;
+  const responseReady = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  let attempts = 0;
+  await mockChatApi(page);
+  await page.unroute("**/api/chat");
+  await page.route("**/api/chat", async (route) => {
+    attempts += 1;
+    const body = route.request().postDataJSON() as { characterId: string; content: string };
+    await responseReady;
+    const response = [
+      message(body.characterId, "user", body.content),
+      message(body.characterId, "assistant", "单次回复"),
+    ];
+    await route.fulfill({ json: { userMessage: response[0], assistantMessage: response[1] } });
+  });
+  await page.goto("/");
+
+  await page.locator('[contenteditable="true"]').fill("不要重复发送");
+  await page.locator(".cs-button--send").click();
+  await expect(page.getByRole("status")).toContainText("正在等待 Momo 回复");
+  await expect(page.locator(".cs-button--send")).toBeDisabled();
+  expect(attempts).toBe(1);
+  releaseResponse();
+  await expect(page.getByText("单次回复")).toBeVisible();
+});
+
+test("about explains the AI identity and MVP limitations outside the chat", async ({ page }) => {
+  await mockChatApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "关于与说明" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("AI 身份");
+  await expect(dialog).toContainText("实验性质");
+  await expect(dialog).toContainText("MVP 限制");
+  await expect(page.locator(".cs-conversation-header")).not.toContainText("AI 角色");
 });

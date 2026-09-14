@@ -18,6 +18,7 @@ export interface Character {
 export interface ChatRequest {
   characterId: string;
   content: string;
+  messageId?: string;
 }
 
 export interface ChatResponse {
