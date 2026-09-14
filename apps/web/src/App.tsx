@@ -540,6 +540,7 @@ export function App() {
     if (!requestModelConfig) {
       setErrorMessage("请先前往设置保存模型配置");
       setActivePanel("settings");
+      setMobileChatOpen(false);
       return;
     }
 

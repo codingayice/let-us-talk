@@ -164,6 +164,7 @@ test("model settings save, restore, clear, and test unsaved values without chat 
 
 test("sending without a local model configuration is blocked before chat history changes", async ({ page }) => {
   let chatRequests = 0;
+  await page.setViewportSize({ width: 390, height: 844 });
   await mockChatApi(page);
   await page.unroute("**/api/chat");
   await page.route("**/api/chat", async (route) => {
@@ -178,6 +179,7 @@ test("sending without a local model configuration is blocked before chat history
   await page.locator(".cs-button--send").click();
   await expect(page.getByRole("alert")).toContainText("请先前往设置保存模型配置");
   await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".im-model-settings")).toBeVisible();
   expect(chatRequests).toBe(0);
   await expect(page.getByText("未配置", { exact: true })).toBeVisible();
 });
