@@ -24,6 +24,16 @@ async function mockChatApi(page: Page) {
   };
   const readCharacters = new Set<string>();
 
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem("let-us-talk:e2e-config-seeded")) {
+      localStorage.setItem("let-us-talk:model-config:v1", JSON.stringify({
+        version: 1,
+        config: { baseUrl: "https://provider.example/v1", apiKey: "test-secret", model: "test-model" },
+      }));
+      sessionStorage.setItem("let-us-talk:e2e-config-seeded", "true");
+    }
+  });
+
   await page.route("**/api/auth/get-session", (route) => route.fulfill({ json: {
     session: { id: "test-session" },
     user: { id: "test-user", email: "test@example.com", name: "测试用户", image: null },
@@ -69,6 +79,9 @@ async function mockChatApi(page: Page) {
     histories[body.characterId] = [...histories[body.characterId], ...response];
     await route.fulfill({ json: { userMessage: response[0], assistantMessage: response[1] } });
   });
+  await page.route("**/api/model/test", async (route) => {
+    await route.fulfill({ json: { ok: true, latencyMs: 12 } });
+  });
 }
 
 test("switching contacts restores the selected contact history", async ({ page }) => {
@@ -112,6 +125,64 @@ test("authenticated shell exposes conversations, contacts and settings as three 
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "账号资料" })).toBeVisible();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "密码管理" })).toBeVisible();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "关于与说明" })).toBeVisible();
+});
+
+test("model settings save, restore, clear, and test unsaved values without chat history", async ({ page }) => {
+  let testRequest: { config: { baseUrl: string; apiKey: string; model: string } } | undefined;
+  await mockChatApi(page);
+  await page.unroute("**/api/model/test");
+  await page.route("**/api/model/test", async (route) => {
+    testRequest = route.request().postDataJSON() as typeof testRequest;
+    await route.fulfill({ json: { ok: true, latencyMs: 7 } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByText("已配置")).toBeVisible();
+  await expect(page.getByLabel("API Key")).toHaveAttribute("type", "password");
+  await page.getByRole("button", { name: "显示" }).click();
+  await expect(page.getByLabel("API Key")).toHaveAttribute("type", "text");
+  await page.getByRole("button", { name: "隐藏" }).click();
+  await page.getByLabel("Base URL").fill("https://unsaved.example/custom");
+  await page.getByLabel("API Key").fill("unsaved-secret");
+  await page.getByLabel("Model").fill("unsaved-model");
+  await page.getByRole("button", { name: "测试连接" }).click();
+  await expect(page.getByRole("status")).toContainText("连接成功");
+  expect(testRequest?.config).toEqual({ baseUrl: "https://unsaved.example/custom", apiKey: "unsaved-secret", model: "unsaved-model" });
+  expect(await page.evaluate(() => localStorage.getItem("let-us-talk:model-config:v1"))).toContain("provider.example");
+
+  await page.getByRole("button", { name: "保存配置" }).click();
+  await expect(page.getByText("配置已保存到当前浏览器")).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByLabel("Base URL")).toHaveValue("https://unsaved.example/custom");
+  await page.getByRole("button", { name: "清除配置" }).click();
+  await expect(page.getByText("已清除本地模型配置")).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("let-us-talk:model-config:v1"))).toBeNull();
+  await page.getByRole("button", { name: "联系人", exact: true }).click();
+  await expect(page.getByText("Momo 历史消息")).toBeVisible();
+});
+
+test("sending without a local model configuration is blocked before chat history changes", async ({ page }) => {
+  let chatRequests = 0;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockChatApi(page);
+  await page.unroute("**/api/chat");
+  await page.route("**/api/chat", async (route) => {
+    chatRequests += 1;
+    await route.continue();
+  });
+  await page.goto("/");
+  await page.evaluate(() => localStorage.removeItem("let-us-talk:model-config:v1"));
+  await page.reload();
+  await page.locator('[data-character-id="momo"]').click();
+  const editor = page.locator('[contenteditable="true"]');
+  await editor.fill("未配置时不应发送");
+  await page.locator(".cs-button--send").click();
+  await expect(page.getByRole("alert")).toContainText("请先前往设置保存模型配置");
+  await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".im-model-settings")).toBeVisible();
+  expect(chatRequests).toBe(0);
+  await expect(page.getByText("未配置", { exact: true })).toBeVisible();
 });
 
 test("a late response from another contact does not leak into the current chat", async ({ page }) => {

@@ -68,6 +68,21 @@ button, textarea { font: inherit; }
 .im-settings-action { display: block; width: calc(100% - 44px); margin: 4px 22px; padding: 10px 11px; border: 0; border-radius: 8px; cursor: pointer; color: #6a6157; background: transparent; text-align: left; font-size: 12px; }
 .im-settings-action:hover { background: #f1eee8; }
 .im-settings-logout { color: #a65345; }
+.im-model-settings { margin: 0 16px 18px; padding: 15px; border: 1px solid #e8e1d7; border-radius: 12px; background: #fffdfa; }
+.im-settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.im-settings-heading h2 { margin: 4px 0 0; color: #4e463d; font-size: 17px; }
+.im-settings-help { margin: 12px 0 0; color: #8c8174; font-size: 11px; line-height: 1.6; }
+.im-config-status { flex: 0 0 auto; padding: 4px 7px; border-radius: 999px; color: #8d6b39; background: #f5ead7; font-size: 10px; }
+.im-config-status-ready { color: #477254; background: #e5f1e5; }
+.im-secret-field { display: flex; gap: 5px; }
+.im-secret-field input { min-width: 0; }
+.im-secret-field button { flex: 0 0 auto; padding: 0 7px; border: 1px solid #ded8cf; border-radius: 8px; cursor: pointer; color: #6a6157; background: #f8f5f0; font-size: 11px; }
+.im-model-actions { display: grid; gap: 7px; }
+.im-model-actions button { width: 100%; }
+.im-secondary-submit, .im-danger-submit { padding: 10px 11px; border: 1px solid #ded8cf; border-radius: 8px; cursor: pointer; color: #655d54; background: #f8f5f0; font-size: 12px; }
+.im-secondary-submit:hover { background: #eee8df; }
+.im-danger-submit { color: #a65345; background: transparent; }
+.im-secondary-submit:disabled, .im-danger-submit:disabled { cursor: not-allowed; opacity: .5; }
 .im-sidebar-footer { display: flex; align-items: center; gap: 9px; margin-top: auto; padding: 18px 22px; color: #b0a99f; font-size: 11px; }
 .im-footer-separator { color: #d0c9bf; }
 .im-about-button { padding: 5px 0; border: 0; cursor: pointer; color: #a49c91; background: transparent; font-size: 11px; }

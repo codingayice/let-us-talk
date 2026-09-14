@@ -37,6 +37,7 @@ export interface ChatRequest {
   content: string;
   messageId?: string;
   conversationId?: string;
+  modelConfig?: ModelConfig;
 }
 
 export interface ChatResponse {
@@ -69,4 +70,10 @@ export interface ConversationDetails {
   conversation: Conversation;
   messages: ChatMessage[];
   tasks: ChatTask[];
+}
+
+export interface ModelConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 }

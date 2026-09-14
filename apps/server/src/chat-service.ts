@@ -1,10 +1,10 @@
 import type { ChatMessage, ChatResponse, ChatTask } from "@let-us-talk/shared";
-import type { ChatModel } from "./model.js";
+import { ModelError, type ModelErrorCategory, toModelError, withModelTimeout, type ChatModel } from "./model.js";
 import type { ChatStore, PreparedChat } from "./store.js";
 import { config } from "./config.js";
 
 export class ChatServiceError extends Error {
-  constructor(public readonly statusCode: number, message: string) {
+  constructor(public readonly statusCode: number, message: string, public readonly category?: ModelErrorCategory) {
     super(message);
   }
 }
@@ -16,37 +16,23 @@ export interface ChatJob {
   content: string;
   clientMessageId: string;
   systemPrompt: string;
+  modelConfig?: Parameters<ChatModel["reply"]>[0]["modelConfig"];
 }
 
 export interface ChatJobCallbacks {
   accepted?: (message: ChatMessage, task: ChatTask) => void;
   processing?: (message: ChatMessage, task: ChatTask) => void;
   completed?: (response: ChatResponse, task: ChatTask) => void;
-  failed?: (message: ChatMessage, task: ChatTask, error: string) => void;
-}
-
-function isTimeout(error: unknown) {
-  return error instanceof Error && error.name === "ChatTimeoutError";
+  failed?: (message: ChatMessage, task: ChatTask, error: string, category?: ModelErrorCategory) => void;
 }
 
 function isRetryable(error: unknown) {
-  if (isTimeout(error)) return false;
-  const status = typeof error === "object" && error !== null && "status" in error ? Number(error.status) : 500;
+  if (error instanceof ModelError && error.category === "timeout") return false;
+  if (error instanceof Error && (error.name === "ModelTimeoutError" || error.name === "ChatTimeoutError" || error.name === "TimeoutError")) return false;
+  const status = typeof error === "object" && error !== null
+    ? "status" in error ? Number(error.status) : "statusCode" in error ? Number(error.statusCode) : 500
+    : 500;
   return !Number.isFinite(status) || status >= 500;
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error("Chat model timed out");
-      error.name = "ChatTimeoutError";
-      reject(error);
-    }, timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
 }
 
 export class ChatService {
@@ -56,18 +42,19 @@ export class ChatService {
   constructor(private readonly store: ChatStore, private readonly chatModel: ChatModel) {}
 
   submit(job: ChatJob, callbacks: ChatJobCallbacks = {}) {
-    const existing = this.store.findUserMessage(job.userId, job.clientMessageId);
-    const queueDepth = this.queueDepths.get(job.conversationId) ?? 0;
-    if (Math.max(queueDepth, this.store.countActiveTasks(job.conversationId)) >= config.maxQueuedTasksPerConversation && !existing) {
+    const requestJob = { ...job, modelConfig: job.modelConfig ? { ...job.modelConfig } : undefined };
+    const existing = this.store.findUserMessage(requestJob.userId, requestJob.clientMessageId);
+    const queueDepth = this.queueDepths.get(requestJob.conversationId) ?? 0;
+    if (Math.max(queueDepth, this.store.countActiveTasks(requestJob.conversationId)) >= config.maxQueuedTasksPerConversation && !existing) {
       return Promise.reject(new ChatServiceError(429, "当前会话消息较多，请稍后重试"));
     }
-    this.queueDepths.set(job.conversationId, queueDepth + 1);
-    const previous = this.queues.get(job.conversationId) ?? Promise.resolve(undefined as unknown as ChatResponse);
-    const current = previous.catch(() => undefined as unknown as ChatResponse).then(() => this.process(job, callbacks));
-    this.queues.set(job.conversationId, current);
+    this.queueDepths.set(requestJob.conversationId, queueDepth + 1);
+    const previous = this.queues.get(requestJob.conversationId) ?? Promise.resolve(undefined as unknown as ChatResponse);
+    const current = previous.catch(() => undefined as unknown as ChatResponse).then(() => this.process(requestJob, callbacks));
+    this.queues.set(requestJob.conversationId, current);
     void current.then(
-      () => this.releaseQueueSlot(job.conversationId, current),
-      () => this.releaseQueueSlot(job.conversationId, current),
+      () => this.releaseQueueSlot(requestJob.conversationId, current),
+      () => this.releaseQueueSlot(requestJob.conversationId, current),
     );
     return current;
   }
@@ -114,7 +101,7 @@ export class ChatService {
     for (let attempt = task.attempts + 1; attempt <= finalAttempt; attempt += 1) {
       task = this.store.updateTask(job.userId, task.id, { status: "processing", attempts: attempt, error: "" });
       try {
-        assistantContent = (await withTimeout(this.chatModel.reply({ systemPrompt: job.systemPrompt, messages: context }), config.llmTimeoutMs)).trim();
+        assistantContent = (await withModelTimeout(this.chatModel.reply({ systemPrompt: job.systemPrompt, messages: context, modelConfig: job.modelConfig }), config.llmTimeoutMs)).trim();
         if (!assistantContent) throw new Error("Chat model returned an empty response");
         lastError = undefined;
         break;
@@ -125,11 +112,13 @@ export class ChatService {
     }
 
     if (lastError || !assistantContent) {
-      const message = isTimeout(lastError) ? "AI 回复超时，请重试" : "AI 暂时不可用，请稍后再试";
+      const modelError = toModelError(lastError);
+      const message = modelError.message;
       task = this.store.updateTask(job.userId, task.id, { status: "failed", error: message });
       const userMessage = this.store.updateMessageStatus(job.userId, prepared.userMessage.id, "sent");
-      callbacks.failed?.(userMessage, task, message);
-      throw new ChatServiceError(502, message);
+      callbacks.failed?.(userMessage, task, message, modelError.category);
+      const statusCode = modelError.category === "config_missing" || modelError.category === "config_invalid" ? 400 : modelError.category === "timeout" ? 504 : 502;
+      throw new ChatServiceError(statusCode, message, modelError.category);
     }
 
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: assistantContent, createdAt: new Date().toISOString(), status: "completed" };

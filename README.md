@@ -25,7 +25,6 @@
 ```bash
 pnpm install
 copy .env.example .env
-# 编辑 .env，填写 LLM_API_KEY 和 LLM_MODEL
 pnpm dev
 ```
 
@@ -36,10 +35,6 @@ API：http://localhost:3001
 
 ## 模型适配
 
-服务端通过 `@ai-sdk/openai-compatible` 接入兼容 OpenAI Chat Completions API 的服务。只需修改：
+登录后打开“设置”，填写 OpenAI-compatible 服务的 Base URL、API Key 和 Model，并先测试连接再保存。配置只保存在当前浏览器；服务端不读取全局模型环境变量，也不会持久化或回显 API Key。
 
-- `LLM_BASE_URL`
-- `LLM_API_KEY`
-- `LLM_MODEL`
-
-业务代码只依赖 `ChatModel` 接口，未来可以增加官方 Anthropic、Google 或本地 Ollama 适配器。
+业务代码通过请求级 `ChatModel` 适配器调用模型，未来可以增加官方 Anthropic、Google 或本地 Ollama 适配器。
