@@ -240,6 +240,7 @@ test("sending disables duplicate submission and clearly reports progress", async
   await editor.fill("不要重复发送");
   await page.locator(".cs-button--send").click();
   await expect(page.getByRole("status")).toContainText("正在等待 Momo 回复");
+  await expect(page.getByText("对方正在输入中…")).toBeVisible();
   await expect(page.locator(".cs-button--send")).toBeDisabled();
   expect(attempts).toBe(1);
   releaseResponse();

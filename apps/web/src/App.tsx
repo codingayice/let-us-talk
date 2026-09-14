@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Character, ChatMessage, ChatResponse, ConversationSummary } from "@let-us-talk/shared";
+import { io, type Socket } from "socket.io-client";
 import {
   Avatar,
   ChatContainer,
@@ -17,6 +18,20 @@ import {
 interface RetryRequest {
   content: string;
   messageId: string;
+}
+
+interface RealtimeCompleted {
+  conversationId: string;
+  messageId: string;
+  userMessage: ChatMessage;
+  assistantMessage: ChatMessage;
+}
+
+interface RealtimeFailed {
+  conversationId: string;
+  messageId: string;
+  userMessage: ChatMessage;
+  error: string;
 }
 
 interface AuthUser {
@@ -44,6 +59,42 @@ function formatTime(value: string) {
 function userFacingError(error: unknown, fallback: string) {
   if (error instanceof TypeError) return "网络连接失败，请稍后重试";
   return error instanceof Error ? error.message : fallback;
+}
+
+function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content: string; messageId: string }) {
+  return new Promise<ChatResponse>((resolve, reject) => {
+    let acknowledged = false;
+    const cleanup = () => {
+      socket.off("chat:completed", onCompleted);
+      socket.off("chat:failed", onFailed);
+      socket.off("disconnect", onDisconnect);
+    };
+    const onCompleted = (event: RealtimeCompleted) => {
+      if (!acknowledged || event.messageId !== payload.messageId) return;
+      cleanup();
+      resolve({ userMessage: event.userMessage, assistantMessage: event.assistantMessage });
+    };
+    const onFailed = (event: RealtimeFailed) => {
+      if (!acknowledged || event.messageId !== payload.messageId) return;
+      cleanup();
+      reject(new Error(event.error));
+    };
+    const onDisconnect = () => {
+      cleanup();
+      reject(new Error("网络连接失败，请稍后重试"));
+    };
+    socket.on("chat:completed", onCompleted);
+    socket.on("chat:failed", onFailed);
+    socket.once("disconnect", onDisconnect);
+    socket.emit("chat:send", payload, (acknowledgment: { ok: boolean; error?: string }) => {
+      if (!acknowledgment.ok) {
+        cleanup();
+        reject(new Error(acknowledgment.error ?? "请求失败"));
+        return;
+      }
+      acknowledged = true;
+    });
+  });
 }
 
 function localizeAuthError(data: { code?: string; message?: string; error?: string }) {
@@ -80,6 +131,7 @@ export function App() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState("");
   const selectedIdRef = useRef(selectedId);
+  const socketRef = useRef<Socket | null>(null);
   selectedIdRef.current = selectedId;
 
   const selected = useMemo(
@@ -115,6 +167,16 @@ export function App() {
       })
       .then((data) => setConversationSummaries(data.conversations ?? []))
       .catch(() => setConversationSummaries([]));
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    const socket = io({ withCredentials: true });
+    socketRef.current = socket;
+    return () => {
+      socket.close();
+      if (socketRef.current === socket) socketRef.current = null;
+    };
   }, [authUser]);
 
   useEffect(() => {
@@ -228,16 +290,22 @@ export function App() {
     setMessages((current) => [...current, userMessage]);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ characterId: requestCharacterId, ...(requestConversationId ? { conversationId: requestConversationId } : {}), content, messageId: userMessage.id }),
-      });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: "请求失败" }));
-        throw new Error(error.error ?? "请求失败");
+      let data: ChatResponse;
+      const socket = socketRef.current;
+      if (socket?.connected && requestConversationId) {
+        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, content, messageId: userMessage.id });
+      } else {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ characterId: requestCharacterId, ...(requestConversationId ? { conversationId: requestConversationId } : {}), content, messageId: userMessage.id }),
+        });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: "请求失败" }));
+          throw new Error(error.error ?? "请求失败");
+        }
+        data = (await response.json()) as ChatResponse;
       }
-      const data = (await response.json()) as ChatResponse;
       if (selectedIdRef.current !== requestCharacterId) return;
       setRetryRequest(null);
       setMessages((current) => [
@@ -395,7 +463,7 @@ export function App() {
             autoScrollToBottom
             autoScrollToBottomOnMount
             scrollBehavior="smooth"
-            typingIndicator={sending ? <TypingIndicator content={`${selected.name} 正在输入`} /> : undefined}
+            typingIndicator={sending ? <TypingIndicator content="对方正在输入中…" /> : undefined}
           >
             {errorMessage && (
               <div className="im-error" role="alert">

@@ -131,11 +131,13 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     const existingUserMessage = conversation[existingUserIndex];
     const existingAssistantMessage = conversation[existingUserIndex + 1];
     if (existingUserMessage?.role === "user" && existingAssistantMessage?.role === "assistant") return { userMessage: existingUserMessage, assistantMessage: existingAssistantMessage };
-    const userMessage = { id: messageId, role: "user" as const, content: parsed.data.content, createdAt: new Date().toISOString() };
+    const userMessage = existingUserMessage?.role === "user"
+      ? existingUserMessage
+      : { id: messageId, role: "user" as const, content: parsed.data.content, createdAt: new Date().toISOString() };
     try {
-      const assistantContent = (await chatModel.reply({ systemPrompt: character.systemPrompt, messages: [...conversation, userMessage] })).trim();
+      if (!existingUserMessage) store.saveMessage(user.id, character.id, userMessage, parsed.data.conversationId);
+      const assistantContent = (await chatModel.reply({ systemPrompt: character.systemPrompt, messages: [...conversation.filter((message) => message.id !== userMessage.id), userMessage] })).trim();
       if (!assistantContent) throw new Error("Chat model returned an empty response");
-      store.saveMessage(user.id, character.id, userMessage, parsed.data.conversationId);
       const assistantMessage = { id: crypto.randomUUID(), role: "assistant" as const, content: assistantContent, createdAt: new Date().toISOString() };
       store.saveMessage(user.id, character.id, assistantMessage, parsed.data.conversationId);
       const response: ChatResponse = { userMessage, assistantMessage };
