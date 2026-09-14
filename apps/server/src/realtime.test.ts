@@ -69,11 +69,28 @@ test("REST chat publishes a conversation update to the authenticated realtime cl
 });
 
 async function register(app: Awaited<ReturnType<typeof setup>>["app"]) {
+  return registerAs(app, `user-${crypto.randomUUID()}@example.com`);
+}
+
+async function registerAs(app: Awaited<ReturnType<typeof setup>>["app"], email: string) {
   const response = await app.inject({
     method: "POST",
     url: "/api/auth/sign-up/email",
     headers: { origin: "http://localhost:3001" },
-    payload: { email: `user-${crypto.randomUUID()}@example.com`, password: "password123", name: "测试用户" },
+    payload: { email, password: "password123", name: "测试用户" },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const value = response.headers["set-cookie"];
+  assert.ok(value);
+  return (Array.isArray(value) ? value : [value]).map((cookie) => cookie.split(";", 1)[0]).join("; ");
+}
+
+async function signIn(app: Awaited<ReturnType<typeof setup>>["app"], email: string) {
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-in/email",
+    headers: { origin: "http://localhost:3001" },
+    payload: { email, password: "password123" },
   });
   assert.equal(response.statusCode, 200, response.body);
   const value = response.headers["set-cookie"];
@@ -145,6 +162,70 @@ test("chat:send rejects unauthenticated sockets and persists a user message when
       socket.close();
     }
   } finally {
+    realtime.close();
+    await app.close();
+    store.close();
+  }
+});
+
+test("a new active device invalidates and disconnects the previous realtime session", async () => {
+  const model: ChatModel = { async reply(input) { return `reply: ${input.messages.at(-1)?.content}`; } };
+  const { app, store, realtime, url } = await setup(model);
+  const email = `user-${crypto.randomUUID()}@example.com`;
+  const firstCookie = await registerAs(app, email);
+  const firstSocket = await connect(url, firstCookie);
+  try {
+    const invalidated = waitForEvent<{ reason: string }>(firstSocket, "auth:session-invalidated");
+    const disconnected = waitForEvent<string>(firstSocket, "disconnect");
+    const secondCookie = await signIn(app, email);
+    const secondSocket = await connect(url, secondCookie);
+    try {
+      assert.equal((await invalidated).reason, "登录已在其他设备完成");
+      await disconnected;
+      assert.equal(firstSocket.connected, false);
+    } finally {
+      secondSocket.close();
+    }
+  } finally {
+    firstSocket.close();
+    realtime.close();
+    await app.close();
+    store.close();
+  }
+});
+
+test("chat:retry reruns only a failed AI reply without duplicating the user message", async () => {
+  let attempts = 0;
+  const model: ChatModel = { async reply(input) {
+    attempts += 1;
+    if (attempts <= 2) throw new Error("temporary failure");
+    return `reply: ${input.messages.at(-1)?.content}`;
+  } };
+  const { app, store, realtime, url } = await setup(model);
+  const cookie = await register(app);
+  const created = await app.inject({ method: "GET", url: "/api/conversations/nora", headers: { cookie } });
+  const conversationId = (JSON.parse(created.body) as { conversation: { id: string } }).conversation.id;
+  const socket = await connect(url, cookie);
+  const messageId = crypto.randomUUID();
+  try {
+    const failed = waitForEvent<{ messageId: string }>(socket, "chat:failed");
+    await new Promise<{ ok: boolean }>((resolve) => {
+      socket.emit("chat:send", { conversationId, characterId: "nora", content: "请重试", messageId }, resolve);
+    });
+    assert.equal((await failed).messageId, messageId);
+
+    const completed = waitForEvent<{ assistantMessage: ChatMessage }>(socket, "chat:completed");
+    const acknowledgment = await new Promise<{ ok: boolean }>((resolve) => {
+      socket.emit("chat:retry", { conversationId, characterId: "nora", messageId }, resolve);
+    });
+    assert.equal(acknowledgment.ok, true);
+    assert.equal((await completed).assistantMessage.content, "reply: 请重试");
+
+    const history = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie } })).body) as { messages: ChatMessage[] };
+    assert.deepEqual(history.messages.map((message) => message.content), ["请重试", "reply: 请重试"]);
+    assert.equal(attempts, 3);
+  } finally {
+    socket.close();
     realtime.close();
     await app.close();
     store.close();

@@ -1,5 +1,5 @@
 import { fromNodeHeaders } from "better-auth/node";
-import type { AuthInstance } from "./auth.js";
+import { authSessionEvents, type AuthInstance } from "./auth.js";
 import { findCharacter, formatConversationPreview } from "./characters.js";
 import type { ChatModel } from "./model.js";
 import type { ChatMessage, ChatTask, ConversationSummary } from "@let-us-talk/shared";
@@ -24,12 +24,18 @@ const chatCommandSchema = z.object({
   content: z.string().trim().min(1).max(4000),
   messageId: z.string().uuid().optional(),
 });
+const retryCommandSchema = z.object({
+  characterId: z.string().min(1),
+  conversationId: z.string().uuid(),
+  messageId: z.string().uuid(),
+});
 
 type ChatAcknowledgment =
   | { ok: true; userMessage: ChatMessage; task?: ChatTask }
   | { ok: false; error: string };
 type JoinAcknowledgment = { ok: true } | { ok: false; error: string };
 type ChatCommand = z.infer<typeof chatCommandSchema>;
+type RetryCommand = z.infer<typeof retryCommandSchema>;
 
 function conversationRoom(conversationId: string) { return `conversation:${conversationId}`; }
 function userRoom(userId: string) { return `user:${userId}`; }
@@ -50,6 +56,22 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
   const io = new Server(httpServer, { cors: { origin: true, credentials: true } });
   const chatService = dependencies.chatService ?? new ChatService(dependencies.store, dependencies.chatModel);
 
+  function disconnectInvalidatedSocket(socket: Socket) {
+    socket.emit("auth:session-invalidated", { eventId: crypto.randomUUID(), reason: "登录已在其他设备完成" });
+    socket.disconnect(true);
+  }
+
+  function disconnectRevokedSessions(userId: string, sessionIds: string[]) {
+    for (const socket of io.sockets.sockets.values()) {
+      if (socket.data.userId === userId && sessionIds.includes(socket.data.sessionId as string)) disconnectInvalidatedSocket(socket);
+    }
+  }
+
+  const onSessionRevoked = ({ userId, sessionIds }: { userId: string; sessionIds: string[] }) => {
+    disconnectRevokedSessions(userId, sessionIds);
+  };
+  authSessionEvents.on("revoked", onSessionRevoked);
+
   function emitEvent(room: string, event: string, payload: Record<string, unknown>) {
     io.to(room).emit(event, { eventId: crypto.randomUUID(), ...payload });
   }
@@ -59,6 +81,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
       const session = await dependencies.auth.api.getSession({ headers: socketHeaders(socket) });
       if (!session) return next(new Error("请先登录"));
       socket.data.userId = session.user.id;
+      socket.data.sessionId = session.session.id;
       return next();
     } catch (error) {
       return next(error instanceof Error ? error : new Error("登录状态无效"));
@@ -71,7 +94,6 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
     if (!character) { acknowledge({ ok: false, error: "Character not found" }); return; }
     const details = dependencies.store.getConversationById(userId, command.conversationId);
     if (!details || details.conversation.characterId !== character.id) { acknowledge({ ok: false, error: "Conversation not found" }); return; }
-
     const room = conversationRoom(command.conversationId);
     socket.join(room);
     let acknowledged = false;
@@ -112,7 +134,23 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
   }
 
   io.on("connection", (socket) => {
-    socket.join(userRoom(socket.data.userId as string));
+    const userId = socket.data.userId as string;
+    const sessionId = socket.data.sessionId as string;
+    for (const peer of io.sockets.sockets.values()) {
+      if (peer !== socket && peer.data.userId === userId && peer.data.sessionId !== sessionId) {
+        disconnectInvalidatedSocket(peer);
+      }
+    }
+    socket.join(userRoom(userId));
+    const sessionCheck = setInterval(() => {
+      void dependencies.auth.api.getSession({ headers: socketHeaders(socket) })
+        .then((session) => {
+          if (!session || session.session.id !== sessionId) disconnectInvalidatedSocket(socket);
+        })
+        .catch(() => undefined);
+    }, 15_000);
+    sessionCheck.unref();
+    socket.once("disconnect", () => clearInterval(sessionCheck));
     socket.on("conversation:join", (rawCommand: unknown, acknowledge?: (value: JoinAcknowledgment) => void) => {
       const parsed = z.object({ conversationId: z.string().uuid(), characterId: z.string().min(1) }).safeParse(rawCommand);
       if (!parsed.success) { acknowledge?.({ ok: false, error: "Invalid conversation command" }); return; }
@@ -128,6 +166,24 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
       if (!parsed.success) { respond({ ok: false, error: "Invalid chat request" }); return; }
       void handleChat(socket, parsed.data, respond);
     });
+
+    socket.on("chat:retry", (rawCommand: unknown, acknowledge?: (value: ChatAcknowledgment) => void) => {
+      const respond = acknowledge ?? (() => undefined);
+      const parsed = retryCommandSchema.safeParse(rawCommand);
+      if (!parsed.success) { respond({ ok: false, error: "Invalid retry request" }); return; }
+      const retry = parsed.data as RetryCommand;
+      const existing = dependencies.store.findUserMessage(userId, retry.messageId);
+      if (!existing || existing.conversationId !== retry.conversationId || existing.characterId !== retry.characterId) {
+        respond({ ok: false, error: "Message not found" });
+        return;
+      }
+      void handleChat(socket, {
+        characterId: retry.characterId,
+        conversationId: retry.conversationId,
+        content: existing.message.content,
+        messageId: existing.message.clientMessageId ?? existing.message.id,
+      }, respond);
+    });
   });
 
   if (dependencies.conversationEvents) {
@@ -138,6 +194,8 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
     dependencies.conversationEvents.on("completed", onCompleted);
     io.once("close", () => dependencies.conversationEvents?.off("completed", onCompleted));
   }
+
+  io.once("close", () => authSessionEvents.off("revoked", onSessionRevoked));
 
   return io;
 }

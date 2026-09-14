@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { betterAuth } from "better-auth";
@@ -9,6 +10,7 @@ import { config } from "./config.js";
 
 export type AuthInstance = Auth<BetterAuthOptions>;
 export const devResetTokens = new Map<string, string>();
+export const authSessionEvents = new EventEmitter();
 
 export async function createAuth(databasePath = config.databasePath): Promise<AuthInstance> {
   if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
@@ -26,6 +28,7 @@ export async function createAuth(databasePath = config.databasePath): Promise<Au
       minPasswordLength: 8,
       maxPasswordLength: 128,
       requireEmailVerification: config.requireEmailVerification,
+      revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url, token }: { user: { email: string }; url: string; token: string }) => {
         if (!config.requireEmailVerification) devResetTokens.set(user.email, token);
         console.info(`Password reset requested for ${user.email}: ${url}`);
@@ -47,7 +50,14 @@ export async function createAuth(databasePath = config.databasePath): Promise<Au
         create: {
           after: async (session: { id: string; userId: string }) => {
             // This product intentionally permits one active device per account.
+            const revoked = database.prepare("SELECT id FROM session WHERE userId = ? AND id <> ?").all(session.userId, session.id) as Array<{ id: string }>;
             database.prepare("DELETE FROM session WHERE userId = ? AND id <> ?").run(session.userId, session.id);
+            if (revoked.length > 0) authSessionEvents.emit("revoked", { userId: session.userId, sessionIds: revoked.map(({ id }) => id) });
+          },
+        },
+        delete: {
+          after: async (session: { id: string; userId: string }) => {
+            authSessionEvents.emit("revoked", { userId: session.userId, sessionIds: [session.id] });
           },
         },
       },

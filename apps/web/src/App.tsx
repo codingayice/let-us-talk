@@ -77,7 +77,7 @@ function userFacingError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content: string; messageId: string }, seenEventIds: Set<string>) {
+function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content?: string; messageId: string }, seenEventIds: Set<string>, command: "chat:send" | "chat:retry" = "chat:send") {
   return new Promise<ChatResponse>((resolve, reject) => {
     let acknowledged = false;
     const cleanup = () => {
@@ -106,7 +106,7 @@ function sendRealtimeMessage(socket: Socket, payload: { characterId: string; con
     socket.on("chat:completed", onCompleted);
     socket.on("chat:failed", onFailed);
     socket.once("disconnect", onDisconnect);
-    socket.emit("chat:send", payload, (acknowledgment: { ok: boolean; error?: string }) => {
+    socket.emit(command, payload, (acknowledgment: { ok: boolean; error?: string }) => {
       if (!acknowledgment.ok) {
         cleanup();
         reject(new Error(acknowledgment.error ?? "请求失败"));
@@ -157,6 +157,7 @@ function localizeAuthError(data: { code?: string; message?: string; error?: stri
 export function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authNotice, setAuthNotice] = useState("");
   const [characters, setCharacters] = useState<Character[]>(fallbackCharacters);
   const [activePanel, setActivePanel] = useState<"conversations" | "contacts" | "settings">("contacts");
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
@@ -275,12 +276,27 @@ export function App() {
       setConversationSummaries((current) => [summary, ...current.filter((item) => item.id !== summary.id)]);
       if (summary.id === selectedConversationIdRef.current) void markConversationRead(summary.id);
     };
+    const onSessionInvalidated = () => {
+      socket.close();
+      setAuthNotice("你的账号已在其他设备登录，当前设备已退出。");
+      setAuthUser(null);
+      setMessages([]);
+      setTasks([]);
+    };
+    const onConnectError = (error: Error) => {
+      if (!error.message.includes("请先登录") && !error.message.includes("登录状态无效")) return;
+      onSessionInvalidated();
+    };
     socket.on("connect", recover);
     socket.on("conversation:updated", onConversationUpdated);
+    socket.on("auth:session-invalidated", onSessionInvalidated);
+    socket.on("connect_error", onConnectError);
     if (socket.connected) recover();
     return () => {
       socket.off("connect", recover);
       socket.off("conversation:updated", onConversationUpdated);
+      socket.off("auth:session-invalidated", onSessionInvalidated);
+      socket.off("connect_error", onConnectError);
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
@@ -512,7 +528,7 @@ export function App() {
     }
   }
 
-  async function sendMessage(value: string, messageId: string = crypto.randomUUID()) {
+  async function sendMessage(value: string, messageId: string = crypto.randomUUID(), retryAssistant = false) {
     const content = value.trim();
     if (!content || sending) return;
 
@@ -536,15 +552,17 @@ export function App() {
       content,
       messageId: userMessage.id,
     };
-    outboxRef.current = [...outboxRef.current.filter((item) => item.messageId !== userMessage.id), outboxItem];
-    if (authUser) writeOutbox(authUser.id, outboxRef.current);
-    setMessages((current) => [...current.filter((message) => !matchesClientMessage(message, userMessage.id)), userMessage]);
+    if (!retryAssistant) {
+      outboxRef.current = [...outboxRef.current.filter((item) => item.messageId !== userMessage.id), outboxItem];
+      if (authUser) writeOutbox(authUser.id, outboxRef.current);
+      setMessages((current) => [...current.filter((message) => !matchesClientMessage(message, userMessage.id)), userMessage]);
+    }
 
     try {
       let data: ChatResponse;
       const socket = socketRef.current;
       if (socket?.connected && requestConversationId) {
-        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, content, messageId: userMessage.id }, seenEventIdsRef.current);
+        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, ...(retryAssistant ? {} : { content }), messageId: userMessage.id }, seenEventIdsRef.current, retryAssistant ? "chat:retry" : "chat:send");
       } else {
         const response = await fetch("/api/chat", {
           method: "POST",
@@ -573,6 +591,10 @@ export function App() {
       setTasks((current) => current.filter((task) => task.userMessageId !== data.userMessage.id && task.userMessageId !== userMessage.id));
     } catch (error) {
       if (selectedIdRef.current !== requestCharacterId) return;
+      if (retryAssistant) {
+        setErrorMessage(userFacingError(error, "AI 回复重试失败，请稍后重试"));
+        return;
+      }
       setMessages((current) => current.map((message) => matchesClientMessage(message, userMessage.id) ? { ...message, status: "failed" } : message));
       setDraft(content);
       setRetryRequest({ content, messageId: userMessage.id });
@@ -608,7 +630,7 @@ export function App() {
   function retryTask(task: ChatTask) {
     const userMessage = messages.find((message) => message.id === task.userMessageId);
     const messageId = userMessage?.clientMessageId ?? userMessage?.id;
-    if (userMessage && messageId) void sendMessage(userMessage.content, messageId);
+    if (userMessage && messageId) void sendMessage(userMessage.content, messageId, true);
   }
 
   if (authLoading) {
@@ -616,7 +638,7 @@ export function App() {
   }
 
   if (!authUser) {
-    return <AuthScreen onAuthenticated={setAuthUser} />;
+    return <AuthScreen notice={authNotice} onAuthenticated={(user) => { setAuthNotice(""); setAuthUser(user); }} />;
   }
 
   return (
@@ -876,7 +898,7 @@ export function App() {
   );
 }
 
-function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }) {
+function AuthScreen({ notice, onAuthenticated }: { notice?: string; onAuthenticated: (user: AuthUser) => void }) {
   const [mode, setMode] = useState<"login" | "register" | "forgot" | "reset">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -930,6 +952,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => 
         <span className="im-dialog-kicker">LET US TALK</span>
         <h1>{title}</h1>
         <p className="im-auth-intro">登录后，和你的 AI 朋友继续聊天。</p>
+        {notice && <div className="im-auth-message" role="status">{notice}</div>}
         <form onSubmit={submit} noValidate>
           {mode === "register" && <label>昵称<input value={name} onChange={(event) => setName(event.target.value)} maxLength={50} /></label>}
           {mode !== "reset" && <label className={fieldErrors.email ? "im-field-error" : ""}>邮箱<input type="email" value={email} onChange={(event) => { setEmail(event.target.value); setFieldErrors((current) => ({ ...current, email: "" })); }} aria-invalid={Boolean(fieldErrors.email)} aria-describedby={fieldErrors.email ? "email-error" : undefined} autoComplete="email" />{fieldErrors.email && <span id="email-error" className="im-field-message">{fieldErrors.email}</span>}</label>}

@@ -89,12 +89,12 @@ export class ChatService {
     if (prepared.conversationId !== job.conversationId) throw new ChatServiceError(409, "Message id belongs to another conversation");
 
     let task = prepared.task;
-    callbacks.accepted?.(prepared.userMessage, task);
     const details = this.store.getConversationById(job.userId, job.conversationId);
     if (!details) throw new ChatServiceError(404, "Conversation not found");
     const userIndex = details.messages.findIndex((message) => message.id === prepared.userMessage.id);
     const existingAssistant = details.messages[userIndex + 1];
     if (task.status === "completed" && existingAssistant?.role === "assistant") {
+      callbacks.accepted?.(prepared.userMessage, task);
       const response = { userMessage: prepared.userMessage, assistantMessage: existingAssistant };
       callbacks.completed?.(response, task);
       return response;
@@ -102,6 +102,7 @@ export class ChatService {
     if (task.status === "processing") throw new ChatServiceError(409, "消息正在处理中，请稍后恢复会话");
     if (task.status === "failed") task = this.store.updateTask(job.userId, task.id, { status: "waiting", error: "" });
 
+    callbacks.accepted?.(prepared.userMessage, task);
     const processingMessage = this.store.updateMessageStatus(job.userId, prepared.userMessage.id, "confirmed");
     task = this.store.updateTask(job.userId, task.id, { status: "processing", error: "" });
     callbacks.processing?.(processingMessage, task);
