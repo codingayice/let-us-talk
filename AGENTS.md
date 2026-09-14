@@ -8,7 +8,7 @@
 
 ### 提交信息
 
-提交信息遵循 Conventional Commits，并使用 GitHub Issue 关联：
+提交信息遵循 Conventional Commits，使用中文，并使用 GitHub Issue 关联：
 
 ```text
 <type>(<scope>): <简短说明>
@@ -19,6 +19,8 @@
 ```
 
 `type` 使用 `feat`、`fix`、`docs`、`test`、`refactor`、`build`、`ci`、`chore` 或 `revert`；`scope` 按需填写。标题使用祈使语气，聚焦一个变更，控制在约 72 个字符内；正文说明“为什么”和重要影响，Issue 关联写在正文末尾。完成提交前，确认提交信息能独立说明变更目的，并且关联的 Issue 编号真实存在。
+
+需求对应的 Issue 完成并验证通过后，关闭该 GitHub Issue，并在关闭时记录完成情况。
 
 ### Triage 标签
 

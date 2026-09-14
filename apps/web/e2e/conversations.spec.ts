@@ -16,6 +16,7 @@ function message(characterId: string, role: "user" | "assistant", content: strin
 }
 
 async function mockChatApi(page: Page) {
+  const conversationIds = { momo: "00000000-0000-4000-8000-000000000001", loki: "00000000-0000-4000-8000-000000000002", nora: "00000000-0000-4000-8000-000000000003" };
   const histories: Record<string, ReturnType<typeof message>[]> = {
     momo: [message("momo", "assistant", "Momo 历史消息")],
     loki: [message("loki", "assistant", "Loki 历史消息")],
@@ -27,12 +28,32 @@ async function mockChatApi(page: Page) {
     user: { id: "test-user", email: "test@example.com", name: "测试用户", image: null },
   } }));
   await page.route("**/api/characters", (route) => route.fulfill({ json: characters }));
+  await page.route("**/api/conversations", (route) => {
+    const conversations = Object.entries(histories)
+      .filter(([, messages]) => messages.length > 0)
+      .map(([characterId, messages]) => {
+        const character = characters.find((item) => item.id === characterId)!;
+        const lastMessage = messages.at(-1)!;
+        return {
+          id: conversationIds[characterId as keyof typeof conversationIds],
+          character,
+          lastMessagePreview: lastMessage.content,
+          lastMessageAt: lastMessage.createdAt,
+          status: "active",
+        };
+      });
+    return route.fulfill({ json: { conversations } });
+  });
   await page.route("**/api/conversations/*", (route) => {
-    const characterId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    const pathParts = new URL(route.request().url()).pathname.split("/");
+    const routeValue = pathParts.at(-1) ?? "";
+    const characterId = pathParts.at(-2) === "by-id"
+      ? Object.entries(conversationIds).find(([, id]) => id === routeValue)?.[0] ?? ""
+      : routeValue;
     if (route.request().method() === "DELETE") {
       histories[characterId] = [];
     }
-    return route.fulfill({ json: { messages: histories[characterId] ?? [] } });
+    return route.fulfill({ json: { conversation: { id: conversationIds[characterId as keyof typeof conversationIds], characterId, status: "active" }, messages: histories[characterId] ?? [] } });
   });
   await page.route("**/api/chat", async (route) => {
     const body = route.request().postDataJSON() as { characterId: string; content: string };
@@ -57,6 +78,34 @@ test("switching contacts restores the selected contact history", async ({ page }
   await page.locator('[data-character-id="momo"]').click();
   await expect(page.getByText("Momo 历史消息")).toBeVisible();
   await expect(page.getByText("Loki 历史消息")).toHaveCount(0);
+});
+
+test("authenticated shell exposes conversations, contacts and settings as three columns", async ({ page }) => {
+  await mockChatApi(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "会话", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("button", { name: "联系人", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "设置", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "联系人", exact: true }).click();
+  await page.locator('[data-character-id="momo"]').click();
+  const editor = page.locator('[contenteditable="true"]');
+  await editor.fill("从联系人进入");
+  await page.locator(".cs-button--send").click();
+  await expect(page.getByText("momo 回复")).toBeVisible();
+
+  await page.getByRole("button", { name: "会话", exact: true }).click();
+  const conversation = page.locator('[data-conversation-id]').first();
+  await expect(conversation).toBeVisible();
+  const conversationId = await conversation.getAttribute("data-conversation-id");
+  expect(conversationId).toBe("00000000-0000-4000-8000-000000000001");
+  await conversation.click();
+  await expect(page.getByText("从联系人进入")).toBeVisible();
+
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.locator(".im-settings-panel").getByRole("button", { name: "账号资料" })).toBeVisible();
+  await expect(page.locator(".im-settings-panel").getByRole("button", { name: "关于与说明" })).toBeVisible();
 });
 
 test("a late response from another contact does not leak into the current chat", async ({ page }) => {

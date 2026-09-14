@@ -41,6 +41,11 @@ function authHeaders(cookie?: string) {
 test("unauthenticated users cannot access conversations or chat", async () => {
   const { app, store } = await setup();
   try {
+    const characters = await app.inject({ method: "GET", url: "/api/characters" });
+    assert.equal(characters.statusCode, 200);
+    assert.equal((JSON.parse(characters.body) as Array<{ id: string; systemPrompt?: string }>).length, 3);
+    assert.equal((JSON.parse(characters.body) as Array<{ systemPrompt?: string }>).some((character) => character.systemPrompt), false);
+    assert.equal((await app.inject({ method: "GET", url: "/api/conversations" })).statusCode, 401);
     assert.equal((await app.inject({ method: "GET", url: "/api/conversations/momo" })).statusCode, 401);
     assert.equal((await app.inject({ method: "POST", url: "/api/chat", payload: { characterId: "momo", content: "你好" } })).statusCode, 401);
   } finally { await app.close(); store.close(); }
@@ -111,5 +116,77 @@ test("authenticated conversations remain isolated by formal user id", async () =
     const secondHistory = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie: second.cookie } })).body).messages as ChatMessage[];
     assert.deepEqual(firstHistory.map((message) => message.content), ["属于第一个", "Fake reply to: 属于第一个"]);
     assert.deepEqual(secondHistory.map((message) => message.content), ["属于第二个", "Fake reply to: 属于第二个"]);
+  } finally { await app.close(); store.close(); }
+});
+
+test("conversation and contact entries resolve to one persistent conversation resource", async () => {
+  const { app, store } = await setup();
+  try {
+    const account = await register(app);
+    const fromContact = await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie: account.cookie } });
+    assert.equal(fromContact.statusCode, 200, fromContact.body);
+    const contactData = JSON.parse(fromContact.body) as { conversation: { id: string; characterId: string; status: string }; messages: ChatMessage[] };
+    assert.equal(contactData.conversation.characterId, "momo");
+    assert.equal(contactData.conversation.status, "active");
+    assert.match(contactData.conversation.id, /^[0-9a-f-]{36}$/);
+    assert.deepEqual(contactData.messages, []);
+
+    const repeatedContact = await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie: account.cookie } });
+    assert.equal(JSON.parse(repeatedContact.body).conversation.id, contactData.conversation.id);
+
+    const fromId = await app.inject({ method: "GET", url: `/api/conversations/by-id/${contactData.conversation.id}`, headers: { cookie: account.cookie } });
+    assert.equal(fromId.statusCode, 200, fromId.body);
+    assert.equal(JSON.parse(fromId.body).conversation.id, contactData.conversation.id);
+
+    const initiallyEmpty = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
+    assert.deepEqual(JSON.parse(initiallyEmpty.body), { conversations: [] });
+
+    const chat = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      headers: { cookie: account.cookie },
+      payload: { characterId: "momo", conversationId: contactData.conversation.id, content: "你好" },
+    });
+    assert.equal(chat.statusCode, 200, chat.body);
+
+    const list = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
+    const listData = JSON.parse(list.body) as { conversations: Array<{ id: string; character: { id: string; name: string; systemPrompt?: string }; lastMessagePreview: string; lastMessageAt: string; status: string }> };
+    assert.equal(listData.conversations.length, 1);
+    assert.equal(listData.conversations[0].id, contactData.conversation.id);
+    assert.deepEqual(listData.conversations[0].character, { id: "momo", name: "Momo", avatar: "🌙", tagline: "温柔、细腻，喜欢听你慢慢说" });
+    assert.equal(listData.conversations[0].lastMessagePreview, "Fake reply to: 你好");
+    assert.equal(listData.conversations[0].status, "active");
+    assert.ok(listData.conversations[0].lastMessageAt);
+
+    const hidden = await app.inject({ method: "DELETE", url: "/api/conversations/momo", headers: { cookie: account.cookie } });
+    assert.equal(hidden.statusCode, 200, hidden.body);
+    const hiddenList = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
+    assert.deepEqual(JSON.parse(hiddenList.body), { conversations: [] });
+    const hiddenDetails = await app.inject({ method: "GET", url: `/api/conversations/by-id/${contactData.conversation.id}`, headers: { cookie: account.cookie } });
+    assert.equal(JSON.parse(hiddenDetails.body).conversation.status, "hidden");
+
+    const restored = await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      headers: { cookie: account.cookie },
+      payload: { characterId: "momo", conversationId: contactData.conversation.id, content: "再次见面" },
+    });
+    assert.equal(restored.statusCode, 200, restored.body);
+    const restoredList = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
+    assert.equal(JSON.parse(restoredList.body).conversations[0].id, contactData.conversation.id);
+  } finally { await app.close(); store.close(); }
+});
+
+test("conversation ids cannot be used across accounts", async () => {
+  const { app, store } = await setup();
+  try {
+    const first = await register(app);
+    const second = await register(app);
+    const created = await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie: first.cookie } });
+    const conversationId = (JSON.parse(created.body) as { conversation: { id: string } }).conversation.id;
+    const response = await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie: second.cookie } });
+    assert.equal(response.statusCode, 404);
+    const chat = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: second.cookie }, payload: { characterId: "momo", conversationId, content: "越权" } });
+    assert.equal(chat.statusCode, 404);
   } finally { await app.close(); store.close(); }
 });

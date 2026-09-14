@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { Character, ChatMessage, ChatResponse } from "@let-us-talk/shared";
+import type { Character, ChatMessage, ChatResponse, ConversationSummary } from "@let-us-talk/shared";
 import {
   Avatar,
   ChatContainer,
@@ -32,7 +32,7 @@ const fallbackCharacters: Character[] = [
   { id: "nora", name: "Nora", avatar: "☕", tagline: "理性又好奇，什么都愿意聊", systemPrompt: "" },
 ];
 
-function avatarSource(character: Character) {
+function avatarSource(character: Pick<Character, "name" | "avatar">) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="24" fill="#eee5d7"/><text x="48" y="62" text-anchor="middle" font-size="42">${character.avatar}</text></svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
@@ -62,7 +62,10 @@ export function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [characters, setCharacters] = useState<Character[]>(fallbackCharacters);
+  const [activePanel, setActivePanel] = useState<"conversations" | "contacts" | "settings">("contacts");
+  const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState("momo");
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -105,18 +108,35 @@ export function App() {
 
   useEffect(() => {
     if (!authUser) return;
+    void fetch("/api/conversations")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("会话列表加载失败");
+        return response.json() as Promise<{ conversations?: ConversationSummary[] }>;
+      })
+      .then((data) => setConversationSummaries(data.conversations ?? []))
+      .catch(() => setConversationSummaries([]));
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
     setMessages([]);
     setErrorMessage("");
     setRetryRequest(null);
     setLoadingConversation(true);
     let cancelled = false;
-    void fetch(`/api/conversations/${selectedId}`)
+    const endpoint = selectedConversationId
+      ? `/api/conversations/by-id/${selectedConversationId}`
+      : `/api/conversations/${selectedId}`;
+    void fetch(endpoint)
       .then(async (response) => {
         if (!response.ok) throw new Error("历史消息加载失败");
-        return response.json() as Promise<{ messages?: ChatMessage[] }>;
+        return response.json() as Promise<{ conversation?: { id: string }; messages?: ChatMessage[] }>;
       })
       .then((data) => {
-        if (!cancelled) setMessages(data.messages ?? []);
+        if (!cancelled) {
+          setSelectedConversationId(data.conversation?.id ?? selectedConversationId);
+          setMessages(data.messages ?? []);
+        }
       })
       .catch((error: unknown) => {
         if (!cancelled) setErrorMessage(userFacingError(error, "历史消息加载失败，请稍后重试"));
@@ -128,6 +148,25 @@ export function App() {
       cancelled = true;
     };
   }, [authUser, selectedId]);
+
+  async function refreshConversationSummaries() {
+    const response = await fetch("/api/conversations");
+    if (!response.ok) throw new Error("会话列表加载失败");
+    const data = await response.json() as { conversations?: ConversationSummary[] };
+    setConversationSummaries(data.conversations ?? []);
+  }
+
+  function selectContact(characterId: string) {
+    setActivePanel("contacts");
+    setSelectedConversationId(null);
+    setSelectedId(characterId);
+  }
+
+  function openConversation(summary: ConversationSummary) {
+    setActivePanel("conversations");
+    setSelectedConversationId(summary.id);
+    setSelectedId(summary.character.id);
+  }
 
   async function logout() {
     await fetch("/api/auth/sign-out", { method: "POST" });
@@ -174,6 +213,7 @@ export function App() {
     if (!content || sending) return;
 
     const requestCharacterId = selectedId;
+    const requestConversationId = selectedConversationId;
 
     setDraft("");
     setErrorMessage("");
@@ -191,7 +231,7 @@ export function App() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ characterId: requestCharacterId, content, messageId: userMessage.id }),
+        body: JSON.stringify({ characterId: requestCharacterId, ...(requestConversationId ? { conversationId: requestConversationId } : {}), content, messageId: userMessage.id }),
       });
       if (!response.ok) {
         const error = await response.json().catch(() => ({ error: "请求失败" }));
@@ -205,6 +245,7 @@ export function App() {
         data.userMessage,
         data.assistantMessage,
       ]);
+      void refreshConversationSummaries().catch(() => undefined);
     } catch (error) {
       if (selectedIdRef.current !== requestCharacterId) return;
       setMessages((current) => current.filter((message) => message.id !== userMessage.id));
@@ -227,6 +268,7 @@ export function App() {
       const response = await fetch(`/api/conversations/${requestCharacterId}`, { method: "DELETE" });
       if (!response.ok) throw new Error("会话清空失败，请稍后重试");
       if (selectedIdRef.current === requestCharacterId) setMessages([]);
+      void refreshConversationSummaries().catch(() => undefined);
     } catch (error) {
       if (selectedIdRef.current === requestCharacterId) {
         setErrorMessage(userFacingError(error, "会话清空失败，请稍后重试"));
@@ -247,6 +289,23 @@ export function App() {
   return (
     <div className="im-app">
       <MainContainer responsive className="im-container">
+        <aside className="im-nav" aria-label="主导航">
+          <div className="im-nav-mark" aria-hidden="true">✦</div>
+          <nav>
+            <button type="button" className={activePanel === "conversations" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="会话" aria-pressed={activePanel === "conversations"} data-nav="conversations" onClick={() => setActivePanel("conversations")}>
+              <span aria-hidden="true">◌</span>
+              <small>会话</small>
+            </button>
+            <button type="button" className={activePanel === "contacts" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="联系人" aria-pressed={activePanel === "contacts"} data-nav="contacts" onClick={() => setActivePanel("contacts")}>
+              <span aria-hidden="true">♧</span>
+              <small>联系人</small>
+            </button>
+            <button type="button" className={activePanel === "settings" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="设置" aria-pressed={activePanel === "settings"} data-nav="settings" onClick={() => setActivePanel("settings")}>
+              <span aria-hidden="true">⚙</span>
+              <small>设置</small>
+            </button>
+          </nav>
+        </aside>
         <Sidebar position="left" scrollable className="im-sidebar">
           <div className="im-brand">
             <div className="im-brand-mark">✦</div>
@@ -255,21 +314,56 @@ export function App() {
                 <span>{authUser.name} · {authUser.email}</span>
               </div>
           </div>
-          <div className="im-section-title">联系人</div>
-          <ConversationList>
-            {characters.map((character) => (
-              <Conversation
-                key={character.id}
-                name={character.name}
-                info={character.tagline}
-                active={character.id === selected.id}
-                data-character-id={character.id}
-                onClick={() => setSelectedId(character.id)}
-              >
-                <Avatar name={character.name} src={avatarSource(character)} />
-              </Conversation>
-            ))}
-          </ConversationList>
+          {activePanel === "conversations" && (
+            <>
+              <div className="im-section-title">会话</div>
+              <ConversationList>
+                {conversationSummaries.map((summary) => (
+                  <Conversation
+                    key={summary.id}
+                    name={summary.character.name}
+                    info={summary.lastMessagePreview}
+                    active={summary.id === selectedConversationId}
+                    data-conversation-id={summary.id}
+                    data-character-id={summary.character.id}
+                    onClick={() => openConversation(summary)}
+                  >
+                    <Avatar name={summary.character.name} src={avatarSource(summary.character)} />
+                    <span className="im-conversation-time">{formatTime(summary.lastMessageAt)}</span>
+                  </Conversation>
+                ))}
+              </ConversationList>
+              {conversationSummaries.length === 0 && <div className="im-list-empty"><strong>还没有会话</strong><span>从联系人开始一段新的聊天</span></div>}
+            </>
+          )}
+          {activePanel === "contacts" && (
+            <>
+              <div className="im-section-title">联系人</div>
+              <ConversationList>
+                {characters.map((character) => (
+                  <Conversation
+                    key={character.id}
+                    name={character.name}
+                    info={character.tagline}
+                    active={character.id === selected.id}
+                    data-character-id={character.id}
+                    onClick={() => selectContact(character.id)}
+                  >
+                    <Avatar name={character.name} src={avatarSource(character)} />
+                  </Conversation>
+                ))}
+              </ConversationList>
+            </>
+          )}
+          {activePanel === "settings" && (
+            <div className="im-settings-panel">
+              <div className="im-section-title">设置</div>
+              <div className="im-settings-user"><strong>{authUser.name}</strong><span>{authUser.email}</span></div>
+              <button type="button" className="im-settings-action" onClick={openProfile}>账号资料</button>
+              <button type="button" className="im-settings-action" onClick={() => setAboutOpen(true)}>关于与说明</button>
+              <button type="button" className="im-settings-action im-settings-logout" onClick={() => void logout()}>退出登录</button>
+            </div>
+          )}
           <div className="im-sidebar-footer">
             <button className="im-about-button" type="button" onClick={openProfile}>账号资料</button>
             <span className="im-footer-separator">·</span>
