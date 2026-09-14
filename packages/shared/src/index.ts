@@ -62,6 +62,7 @@ export interface ConversationSummary {
   lastMessagePreview: string;
   lastMessageAt: string;
   status: ConversationStatus;
+  unread: boolean;
 }
 
 export interface ConversationDetails {

@@ -22,6 +22,7 @@ async function mockChatApi(page: Page) {
     loki: [message("loki", "assistant", "Loki 历史消息")],
     nora: [],
   };
+  const readCharacters = new Set<string>();
 
   await page.route("**/api/auth/get-session", (route) => route.fulfill({ json: {
     session: { id: "test-session" },
@@ -40,16 +41,20 @@ async function mockChatApi(page: Page) {
           lastMessagePreview: lastMessage.content,
           lastMessageAt: lastMessage.createdAt,
           status: "active",
+          unread: messages.length > 0 && !readCharacters.has(characterId),
         };
       });
     return route.fulfill({ json: { conversations } });
   });
-  await page.route("**/api/conversations/*", (route) => {
+  await page.route("**/api/conversations/**", (route) => {
     const pathParts = new URL(route.request().url()).pathname.split("/");
     const routeValue = pathParts.at(-1) ?? "";
     const characterId = pathParts.at(-2) === "by-id"
       ? Object.entries(conversationIds).find(([, id]) => id === routeValue)?.[0] ?? ""
-      : routeValue;
+      : pathParts.at(-1) === "read" || pathParts.at(-1) === "hide" || pathParts.at(-1) === "restore"
+        ? pathParts.at(-2) ?? ""
+        : routeValue;
+    if (route.request().method() === "POST" && pathParts.at(-1) === "read") readCharacters.add(characterId);
     if (route.request().method() === "DELETE") {
       histories[characterId] = [];
     }
@@ -105,6 +110,7 @@ test("authenticated shell exposes conversations, contacts and settings as three 
 
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "账号资料" })).toBeVisible();
+  await expect(page.locator(".im-settings-panel").getByRole("button", { name: "密码管理" })).toBeVisible();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "关于与说明" })).toBeVisible();
 });
 
@@ -144,6 +150,7 @@ test("clearing the current conversation shows the empty state without clearing a
   await page.goto("/");
 
   await expect(page.getByText("Momo 历史消息")).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "清空当前会话" }).click();
   await expect(page.getByText("开始和 Momo 聊天")).toBeVisible();
   await expect(page.getByText("Momo 历史消息")).toHaveCount(0);
@@ -276,4 +283,54 @@ test("auth form uses custom validation and Chinese login errors", async ({ page 
   await page.getByLabel("密码").fill("password123");
   await page.getByRole("button", { name: "欢迎回来" }).click();
   await expect(page.getByRole("alert")).toHaveText("邮箱或密码错误");
+});
+
+test("conversation summaries show unread dots and opening a conversation clears the dot", async ({ page }) => {
+  await mockChatApi(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "会话", exact: true }).click();
+  await expect(page.locator('[aria-label="未读消息"]')).toHaveCount(1);
+  await page.locator('[data-conversation-id="00000000-0000-4000-8000-000000000002"]').click();
+  await expect(page.locator('[aria-label="未读消息"]')).toHaveCount(0);
+});
+
+test("desktop context menu hides a conversation and contact selection restores its history", async ({ page }) => {
+  await mockChatApi(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "会话", exact: true }).click();
+  const conversation = page.locator('[data-conversation-id="00000000-0000-4000-8000-000000000001"]');
+  await conversation.click({ button: "right" });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.getByRole("menuitem", { name: "隐藏会话" }).click({ force: true });
+  await expect(conversation).toHaveCount(0);
+  await page.getByRole("button", { name: "联系人", exact: true }).click();
+  await page.locator('[data-character-id="momo"]').click();
+  await expect(page.getByText("Momo 历史消息")).toBeVisible();
+});
+
+test("messages preserve emoji and can be copied", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await mockChatApi(page);
+  await page.goto("/");
+  const editor = page.locator('[contenteditable="true"]');
+  await expect(editor).toBeEditable();
+  await editor.fill("你好 ✨🙂");
+  await page.locator(".cs-button--send").click();
+  await expect(page.getByText("你好 ✨🙂", { exact: true })).toBeVisible();
+  const sentMessage = page.locator(".im-message-row").filter({ hasText: "你好 ✨🙂" });
+  await sentMessage.getByRole("button", { name: "复制消息" }).click();
+  await expect(sentMessage.getByRole("button", { name: "复制消息" })).toContainText("已复制");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("你好 ✨🙂");
+});
+
+test("mobile navigation opens a selected contact in the chat pane and returns to the list", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockChatApi(page);
+  await page.goto("/");
+  await expect(page.locator('[data-mobile-chat="false"]')).toBeVisible();
+  await page.locator('[data-character-id="loki"]').click();
+  await expect(page.locator('[data-mobile-chat="true"]')).toBeVisible();
+  await expect(page.getByText("Loki 历史消息")).toBeVisible();
+  await page.getByRole("button", { name: "返回列表" }).click();
+  await expect(page.locator('[data-mobile-chat="false"]')).toBeVisible();
 });

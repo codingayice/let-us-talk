@@ -51,6 +51,12 @@ interface AuthUser {
   image?: string | null;
 }
 
+interface ConversationMenuState {
+  conversationId: string;
+  x: number;
+  y: number;
+}
+
 const fallbackCharacters: Character[] = [
   { id: "momo", name: "Momo", avatar: "🌙", tagline: "温柔、细腻，喜欢听你慢慢说", systemPrompt: "" },
   { id: "loki", name: "Loki", avatar: "🦊", tagline: "有点毒舌，但总是站在你这边", systemPrompt: "" },
@@ -115,6 +121,10 @@ function outboxKey(userId: string) {
   return `let-us-talk:outbox:${userId}`;
 }
 
+function viewPositionKey(userId: string, conversationId: string) {
+  return `let-us-talk:view-position:${userId}:${conversationId}`;
+}
+
 function readOutbox(userId: string): OutboxItem[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(outboxKey(userId)) ?? "[]") as unknown;
@@ -152,6 +162,7 @@ export function App() {
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState("momo");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tasks, setTasks] = useState<ChatTask[]>([]);
   const [draft, setDraft] = useState("");
@@ -166,14 +177,29 @@ export function App() {
   const [profileImage, setProfileImage] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState("");
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [conversationMenu, setConversationMenu] = useState<ConversationMenuState | null>(null);
   const selectedIdRef = useRef(selectedId);
   const selectedConversationIdRef = useRef(selectedConversationId);
   const socketRef = useRef<Socket | null>(null);
   const seenEventIdsRef = useRef(new Set<string>());
   const outboxRef = useRef<OutboxItem[]>([]);
   const loadedConversationKeyRef = useRef("");
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readConversationIdsRef = useRef(new Set<string>());
   selectedIdRef.current = selectedId;
   selectedConversationIdRef.current = selectedConversationId;
+
+  useEffect(() => {
+    if (!conversationMenu) return;
+    const close = () => setConversationMenu(null);
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [conversationMenu]);
 
   const selected = useMemo(
     () => characters.find((character) => character.id === selectedId) ?? fallbackCharacters[0],
@@ -212,7 +238,7 @@ export function App() {
         if (!response.ok) throw new Error("会话列表加载失败");
         return response.json() as Promise<{ conversations?: ConversationSummary[] }>;
       })
-      .then((data) => setConversationSummaries(data.conversations ?? []))
+      .then((data) => setConversationSummaries((data.conversations ?? []).map((summary) => readConversationIdsRef.current.has(summary.id) ? { ...summary, unread: false } : summary)))
       .catch(() => setConversationSummaries([]));
   }, [authUser]);
 
@@ -221,6 +247,7 @@ export function App() {
     outboxRef.current = readOutbox(authUser.id);
     seenEventIdsRef.current.clear();
     loadedConversationKeyRef.current = "";
+    readConversationIdsRef.current.clear();
     setTasks([]);
   }, [authUser]);
 
@@ -242,10 +269,18 @@ export function App() {
         })
         .catch(() => undefined);
     };
+    const onConversationUpdated = (event: { summary?: ConversationSummary }) => {
+      const summary = event.summary;
+      if (!summary) return;
+      setConversationSummaries((current) => [summary, ...current.filter((item) => item.id !== summary.id)]);
+      if (summary.id === selectedConversationIdRef.current) void markConversationRead(summary.id);
+    };
     socket.on("connect", recover);
+    socket.on("conversation:updated", onConversationUpdated);
     if (socket.connected) recover();
     return () => {
       socket.off("connect", recover);
+      socket.off("conversation:updated", onConversationUpdated);
       socket.close();
       if (socketRef.current === socket) socketRef.current = null;
     };
@@ -266,7 +301,13 @@ export function App() {
     void fetch(endpoint)
       .then(async (response) => {
         if (!response.ok) throw new Error("历史消息加载失败");
-        return response.json() as Promise<{ conversation?: { id: string }; messages?: ChatMessage[]; tasks?: ChatTask[] }>;
+        return response.json() as Promise<{ conversation?: { id: string; status?: string }; messages?: ChatMessage[]; tasks?: ChatTask[] }>;
+      })
+      .then((data) => {
+        if (data.conversation?.status === "hidden" && data.conversation.id) {
+          return fetch(`/api/conversations/${selectedId}/restore`, { method: "POST" }).then(() => data);
+        }
+        return data;
       })
       .then((data) => {
         if (!cancelled) {
@@ -284,6 +325,7 @@ export function App() {
             .filter((item) => item.conversationId === data.conversation?.id && !serverMessages.some((message) => matchesClientMessage(message, item.messageId)))
             .map((item): ChatMessage => ({ id: item.messageId, clientMessageId: item.messageId, role: "user", content: item.content, createdAt: new Date().toISOString(), status: "failed" }))]);
           setTasks(serverTasks);
+          if (data.conversation?.id) void markConversationRead(data.conversation.id);
           const recoverable = outboxRef.current.find((item) => item.conversationId === data.conversation?.id);
           if (recoverable) setRetryRequest({ content: recoverable.content, messageId: recoverable.messageId });
         }
@@ -299,6 +341,24 @@ export function App() {
     };
   }, [authUser, selectedId, selectedConversationId]);
 
+  useEffect(() => {
+    if (!authUser || !selectedConversationId) return;
+    const scrollWrapper = document.querySelector<HTMLDivElement>(".im-chat-container .cs-message-list__scroll-wrapper");
+    if (!scrollWrapper) return;
+    const key = viewPositionKey(authUser.id, selectedConversationId);
+    const restore = () => {
+      const saved = Number(localStorage.getItem(key));
+      if (Number.isFinite(saved)) scrollWrapper.scrollTop = Math.max(0, saved);
+    };
+    const frame = window.requestAnimationFrame(restore);
+    const save = () => localStorage.setItem(key, String(scrollWrapper.scrollTop));
+    scrollWrapper.addEventListener("scroll", save);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scrollWrapper.removeEventListener("scroll", save);
+    };
+  }, [authUser, selectedConversationId, messages.length, loadingConversation]);
+
   async function refreshConversationSummaries() {
     const response = await fetch("/api/conversations");
     if (!response.ok) throw new Error("会话列表加载失败");
@@ -306,16 +366,82 @@ export function App() {
     setConversationSummaries(data.conversations ?? []);
   }
 
+  async function markConversationRead(conversationId: string) {
+    readConversationIdsRef.current.add(conversationId);
+    setConversationSummaries((current) => current.map((summary) => summary.id === conversationId ? { ...summary, unread: false } : summary));
+    const response = await fetch(`/api/conversations/by-id/${conversationId}/read`, { method: "POST" });
+    if (!response.ok) return;
+  }
+
+  async function copyMessage(message: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? null : current), 1400);
+    } catch {
+      setErrorMessage("复制失败，请手动选择文字复制");
+    }
+  }
+
   function selectContact(characterId: string) {
     setActivePanel("contacts");
+    setMobileChatOpen(true);
     setSelectedConversationId(null);
     setSelectedId(characterId);
   }
 
   function openConversation(summary: ConversationSummary) {
     setActivePanel("conversations");
+    setMobileChatOpen(true);
     setSelectedConversationId(summary.id);
     setSelectedId(summary.character.id);
+    void markConversationRead(summary.id);
+  }
+
+  function showConversationMenu(event: React.MouseEvent, conversationId: string) {
+    event.preventDefault();
+    setConversationMenu({ conversationId, x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 120) });
+  }
+
+  function startConversationLongPress(event: React.PointerEvent, conversationId: string) {
+    if (event.pointerType !== "touch") return;
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      setConversationMenu({ conversationId, x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 120) });
+    }, 550);
+  }
+
+  function cancelConversationLongPress() {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  }
+
+  async function hideConversation(conversationId: string) {
+    const summary = conversationSummaries.find((item) => item.id === conversationId);
+    if (!summary) return;
+    const response = await fetch(`/api/conversations/${summary.character.id}/hide`, { method: "POST" });
+    if (!response.ok) return;
+    setConversationSummaries((current) => current.filter((item) => item.id !== conversationId));
+    setConversationMenu(null);
+    if (selectedConversationIdRef.current === conversationId) {
+      setSelectedConversationId(null);
+      setActivePanel("contacts");
+      setMobileChatOpen(false);
+    }
+  }
+
+  async function clearConversationById(conversationId: string) {
+    const summary = conversationSummaries.find((item) => item.id === conversationId);
+    if (!summary) return;
+    setConversationMenu(null);
+    if (!window.confirm(`确定清空与 ${summary.character.name} 的全部历史消息吗？`)) return;
+    const response = await fetch(`/api/conversations/${summary.character.id}`, { method: "DELETE" });
+    if (!response.ok) return;
+    await refreshConversationSummaries().catch(() => undefined);
+    if (selectedConversationIdRef.current === conversationId) {
+      setMessages([]);
+      setTasks([]);
+    }
   }
 
   async function logout() {
@@ -356,6 +482,33 @@ export function App() {
       setProfileError(error instanceof Error ? error.message : "资料更新失败，请稍后重试");
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  function openPasswordManagement() {
+    setPasswordMessage("");
+    setPasswordError("");
+    setPasswordOpen(true);
+  }
+
+  async function requestPasswordReset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!authUser) return;
+    setPasswordSaving(true);
+    setPasswordError("");
+    setPasswordMessage("");
+    try {
+      const response = await fetch("/api/auth/request-password-reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authUser.email, redirectTo: `${window.location.origin}/reset-password` }),
+      });
+      if (!response.ok) throw new Error("暂时无法发送重置邮件，请稍后重试");
+      setPasswordMessage("如果邮箱已注册，重置链接已发送，请查收邮件。");
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : "暂时无法发送重置邮件，请稍后重试");
+    } finally {
+      setPasswordSaving(false);
     }
   }
 
@@ -406,6 +559,10 @@ export function App() {
       }
       outboxRef.current = outboxRef.current.filter((item) => item.messageId !== userMessage.id);
       if (authUser) writeOutbox(authUser.id, outboxRef.current);
+      void refreshConversationSummaries().then(() => {
+        if (selectedConversationIdRef.current === requestConversationId && requestConversationId) return markConversationRead(requestConversationId);
+        return undefined;
+      }).catch(() => undefined);
       if (selectedIdRef.current !== requestCharacterId) return;
       setRetryRequest(null);
       setMessages((current) => [
@@ -414,7 +571,6 @@ export function App() {
         data.assistantMessage,
       ]);
       setTasks((current) => current.filter((task) => task.userMessageId !== data.userMessage.id && task.userMessageId !== userMessage.id));
-      void refreshConversationSummaries().catch(() => undefined);
     } catch (error) {
       if (selectedIdRef.current !== requestCharacterId) return;
       setMessages((current) => current.map((message) => matchesClientMessage(message, userMessage.id) ? { ...message, status: "failed" } : message));
@@ -428,6 +584,7 @@ export function App() {
 
   async function clearConversation() {
     if (sending || loadingConversation || clearing) return;
+    if (!window.confirm(`确定清空与 ${selected.name} 的全部历史消息吗？`)) return;
 
     const requestCharacterId = selectedId;
     setClearing(true);
@@ -463,20 +620,20 @@ export function App() {
   }
 
   return (
-    <div className="im-app">
+    <div className="im-app" data-mobile-chat={mobileChatOpen ? "true" : "false"}>
       <MainContainer responsive className="im-container">
         <aside className="im-nav" aria-label="主导航">
           <div className="im-nav-mark" aria-hidden="true">✦</div>
           <nav>
-            <button type="button" className={activePanel === "conversations" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="会话" aria-pressed={activePanel === "conversations"} data-nav="conversations" onClick={() => setActivePanel("conversations")}>
+            <button type="button" className={activePanel === "conversations" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="会话" aria-pressed={activePanel === "conversations"} data-nav="conversations" onClick={() => { setActivePanel("conversations"); setMobileChatOpen(false); }}>
               <span aria-hidden="true">◌</span>
               <small>会话</small>
             </button>
-            <button type="button" className={activePanel === "contacts" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="联系人" aria-pressed={activePanel === "contacts"} data-nav="contacts" onClick={() => setActivePanel("contacts")}>
+            <button type="button" className={activePanel === "contacts" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="联系人" aria-pressed={activePanel === "contacts"} data-nav="contacts" onClick={() => { setActivePanel("contacts"); setMobileChatOpen(false); }}>
               <span aria-hidden="true">♧</span>
               <small>联系人</small>
             </button>
-            <button type="button" className={activePanel === "settings" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="设置" aria-pressed={activePanel === "settings"} data-nav="settings" onClick={() => setActivePanel("settings")}>
+            <button type="button" className={activePanel === "settings" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="设置" aria-pressed={activePanel === "settings"} data-nav="settings" onClick={() => { setActivePanel("settings"); setMobileChatOpen(false); }}>
               <span aria-hidden="true">⚙</span>
               <small>设置</small>
             </button>
@@ -495,18 +652,28 @@ export function App() {
               <div className="im-section-title">会话</div>
               <ConversationList>
                 {conversationSummaries.map((summary) => (
-                  <Conversation
+                  <div
                     key={summary.id}
-                    name={summary.character.name}
-                    info={summary.lastMessagePreview}
-                    active={summary.id === selectedConversationId}
+                    className="im-conversation-row"
                     data-conversation-id={summary.id}
                     data-character-id={summary.character.id}
-                    onClick={() => openConversation(summary)}
+                    onContextMenu={(event) => showConversationMenu(event, summary.id)}
+                    onPointerDown={(event) => startConversationLongPress(event, summary.id)}
+                    onPointerUp={cancelConversationLongPress}
+                    onPointerCancel={cancelConversationLongPress}
+                    onPointerLeave={cancelConversationLongPress}
                   >
-                    <Avatar name={summary.character.name} src={avatarSource(summary.character)} />
-                    <span className="im-conversation-time">{formatTime(summary.lastMessageAt)}</span>
-                  </Conversation>
+                    <Conversation
+                      name={summary.character.name}
+                      info={summary.lastMessagePreview}
+                      active={summary.id === selectedConversationId}
+                      onClick={() => openConversation(summary)}
+                    >
+                      <Avatar name={summary.character.name} src={avatarSource(summary.character)} />
+                      <span className="im-conversation-time">{formatTime(summary.lastMessageAt)}</span>
+                    </Conversation>
+                    {summary.unread && <span className="im-unread-dot" aria-label="未读消息" />}
+                  </div>
                 ))}
               </ConversationList>
               {conversationSummaries.length === 0 && <div className="im-list-empty"><strong>还没有会话</strong><span>从联系人开始一段新的聊天</span></div>}
@@ -536,6 +703,7 @@ export function App() {
               <div className="im-section-title">设置</div>
               <div className="im-settings-user"><strong>{authUser.name}</strong><span>{authUser.email}</span></div>
               <button type="button" className="im-settings-action" onClick={openProfile}>账号资料</button>
+              <button type="button" className="im-settings-action" onClick={openPasswordManagement}>密码管理</button>
               <button type="button" className="im-settings-action" onClick={() => setAboutOpen(true)}>关于与说明</button>
               <button type="button" className="im-settings-action im-settings-logout" onClick={() => void logout()}>退出登录</button>
             </div>
@@ -554,6 +722,7 @@ export function App() {
             <Avatar name={selected.name} src={avatarSource(selected)} status="available" />
             <ConversationHeader.Content userName={selected.name} info={selected.tagline} />
             <ConversationHeader.Actions>
+              <button type="button" className="im-mobile-back" aria-label="返回列表" onClick={() => setMobileChatOpen(false)}>‹</button>
               <button type="button" className="im-clear-button" onClick={() => void logout()}>退出登录</button>
               <button
                 type="button"
@@ -571,7 +740,7 @@ export function App() {
             autoScrollToBottom
             autoScrollToBottomOnMount
             scrollBehavior="smooth"
-            typingIndicator={sending ? <TypingIndicator content="对方正在输入中…" /> : undefined}
+            typingIndicator={sending || tasks.some((task) => task.status === "waiting" || task.status === "processing") ? <TypingIndicator content="对方正在输入中…" /> : undefined}
           >
             {errorMessage && (
               <div className="im-error" role="alert">
@@ -615,17 +784,19 @@ export function App() {
                 <span>{selected.tagline}</span>
               </div>
             )}
-            {messages.map((message) => (
-              <Message
-                key={message.id}
-                model={{
-                  message: message.content || (sending && message.role === "assistant" ? "…" : ""),
-                  sentTime: formatTime(message.createdAt),
-                  sender: message.role === "assistant" ? selected.name : "我",
-                  direction: message.role === "assistant" ? "incoming" : "outgoing",
-                  position: "single",
-                }}
-              />
+            {messages.filter((message) => message.content).map((message) => (
+              <div className="im-message-row" key={message.id}>
+                <Message
+                  model={{
+                    message: message.content,
+                    sentTime: formatTime(message.createdAt),
+                    sender: message.role === "assistant" ? selected.name : "我",
+                    direction: message.role === "assistant" ? "incoming" : "outgoing",
+                    position: "single",
+                  }}
+                />
+                <button type="button" className="im-copy-message" aria-label="复制消息" onClick={() => void copyMessage(message)}>{copiedMessageId === message.id ? "已复制" : "复制"}</button>
+              </div>
             ))}
           </MessageList>
 
@@ -642,6 +813,12 @@ export function App() {
           />
         </ChatContainer>
       </MainContainer>
+      {conversationMenu && (
+        <div className="im-context-menu" role="menu" style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+          <button type="button" role="menuitem" onClick={() => void hideConversation(conversationMenu.conversationId)}>隐藏会话</button>
+          <button type="button" role="menuitem" onClick={() => void clearConversationById(conversationMenu.conversationId)}>清空历史</button>
+        </div>
+      )}
       {aboutOpen && (
         <div className="im-modal-backdrop" role="presentation">
           <section className="im-about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
@@ -675,6 +852,22 @@ export function App() {
               <label>头像地址<input type="url" value={profileImage} onChange={(event) => setProfileImage(event.target.value)} placeholder="https://…（可选）" /></label>
               {profileError && <div className="im-auth-error" role="alert">{profileError}</div>}
               <button className="im-auth-submit" type="submit" disabled={profileSaving}>{profileSaving ? "保存中…" : "保存资料"}</button>
+            </form>
+          </section>
+        </div>
+      )}
+      {passwordOpen && (
+        <div className="im-modal-backdrop" role="presentation">
+          <section className="im-about-dialog" role="dialog" aria-modal="true" aria-labelledby="password-title">
+            <div className="im-about-heading">
+              <div><span className="im-dialog-kicker">SECURITY</span><h2 id="password-title">密码管理</h2></div>
+              <button type="button" aria-label="关闭密码管理" onClick={() => setPasswordOpen(false)}>×</button>
+            </div>
+            <form className="im-profile-form" onSubmit={requestPasswordReset}>
+              <p className="im-about-copy">我们会向 {authUser.email} 发送密码重置链接。</p>
+              {passwordError && <div className="im-auth-error" role="alert">{passwordError}</div>}
+              {passwordMessage && <div className="im-auth-message" role="status">{passwordMessage}</div>}
+              <button className="im-auth-submit" type="submit" disabled={passwordSaving}>{passwordSaving ? "发送中…" : "发送重置邮件"}</button>
             </form>
           </section>
         </div>

@@ -1,4 +1,5 @@
 import type { Character } from "@let-us-talk/shared";
+import type { ChatMessage } from "@let-us-talk/shared";
 
 export const characters: Character[] = [
   {
@@ -29,4 +30,10 @@ export const characters: Character[] = [
 
 export function findCharacter(id: string) {
   return characters.find((character) => character.id === id);
+}
+
+export function formatConversationPreview(characterName: string, role: ChatMessage["role"], content: string) {
+  const codePoints = Array.from(content);
+  const preview = codePoints.slice(0, 80).join("");
+  return `${role === "assistant" ? characterName : "我"}：${preview}${codePoints.length > 80 ? "…" : ""}`;
 }

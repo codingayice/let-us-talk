@@ -7,6 +7,7 @@ import { createAuth } from "./auth.js";
 import { type ChatModel } from "./model.js";
 import { createStore } from "./store.js";
 import { attachRealtimeChat } from "./realtime.js";
+import { ConversationEventBus } from "./conversation-events.js";
 
 function waitForEvent<T>(socket: Socket, event: string) {
   return new Promise<T>((resolve, reject) => {
@@ -36,13 +37,36 @@ function createDeferredModel() {
 async function setup(chatModel: ChatModel) {
   const store = createStore(":memory:");
   const auth = await createAuth(":memory:");
-  const app = buildApp({ store, auth, chatModel });
-  const realtime = attachRealtimeChat(app.server, { auth, chatModel, store });
+  const conversationEvents = new ConversationEventBus();
+  const app = buildApp({ store, auth, chatModel, conversationEvents });
+  const realtime = attachRealtimeChat(app.server, { auth, chatModel, store, conversationEvents });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const address = app.server.address();
   assert.ok(address && typeof address !== "string");
   return { app, store, realtime, url: `http://127.0.0.1:${address.port}` };
 }
+
+test("REST chat publishes a conversation update to the authenticated realtime clients", async () => {
+  const chatModel: ChatModel = { async reply(input) { return `REST reply to: ${input.messages.at(-1)?.content}`; } };
+  const { app, store, realtime, url } = await setup(chatModel);
+  const cookie = await register(app);
+  const created = await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie } });
+  const conversationId = (JSON.parse(created.body) as { conversation: { id: string } }).conversation.id;
+  const socket = await connect(url, cookie);
+  try {
+    const updated = waitForEvent<{ summary: { id: string; lastMessagePreview: string } }>(socket, "conversation:updated");
+    const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { conversationId, characterId: "momo", content: "来自 HTTP" } });
+    assert.equal(response.statusCode, 200, response.body);
+    const event = await updated;
+    assert.equal(event.summary.id, conversationId);
+    assert.equal(event.summary.lastMessagePreview, "Momo：REST reply to: 来自 HTTP");
+  } finally {
+    socket.close();
+    realtime.close();
+    await app.close();
+    store.close();
+  }
+});
 
 async function register(app: Awaited<ReturnType<typeof setup>>["app"]) {
   const response = await app.inject({

@@ -20,7 +20,7 @@ export interface PreparedChat {
 export interface ChatStore {
   getConversation(userId: string, characterId: string): ConversationDetails;
   getConversationById(userId: string, conversationId: string): ConversationDetails | undefined;
-  listConversations(userId: string): Array<Pick<ConversationSummary, "id" | "lastMessagePreview" | "lastMessageAt" | "status"> & { characterId: string }>;
+  listConversations(userId: string): Array<Pick<ConversationSummary, "id" | "lastMessagePreview" | "lastMessageAt" | "status" | "unread"> & { characterId: string; lastMessageRole: ChatMessage["role"] }>;
   prepareChat(userId: string, characterId: string, content: string, clientMessageId: string, conversationId?: string): PreparedChat;
   saveMessage(userId: string, characterId: string, message: ChatMessage, conversationId?: string, clientMessageId?: string): void;
   findUserMessage(userId: string, clientMessageId: string): { conversationId: string; characterId: string; message: ChatMessage } | undefined;
@@ -29,15 +29,18 @@ export interface ChatStore {
   updateTask(userId: string, taskId: string, update: { status?: ChatTask["status"]; attempts?: number; error?: string }): ChatTask;
   updateMessageStatus(userId: string, messageId: string, status: ChatMessage["status"]): ChatMessage;
   countActiveTasks(conversationId: string): number;
+  markConversationRead(userId: string, conversationId: string): void;
+  hideConversation(userId: string, conversationId: string): void;
+  restoreConversation(userId: string, conversationId: string): void;
   clearConversation(userId: string, characterId: string): void;
   close(): void;
 }
 
-interface ConversationRow { id: string; character_id: string; created_at: string; updated_at: string; hidden_at: string | null; }
+interface ConversationRow { id: string; character_id: string; created_at: string; updated_at: string; hidden_at: string | null; last_read_sequence: number; }
 interface MessageRow { id: string; client_message_id: string | null; role: ChatMessage["role"]; content: string; created_at: string; status: ChatMessage["status"]; }
 interface UserMessageRow extends MessageRow { conversation_id: string; character_id: string; }
 interface TaskRow { id: string; conversation_id: string; user_message_id: string; status: ChatTask["status"]; attempts: number; error: string | null; created_at: string; updated_at: string; }
-interface ConversationSummaryRow { id: string; character_id: string; content: string; created_at: string; hidden_at: string | null; }
+interface ConversationSummaryRow { id: string; character_id: string; content: string; role: ChatMessage["role"]; created_at: string; hidden_at: string | null; unread: number; }
 
 function taskFromRow(row: TaskRow): ChatTask {
   return { id: row.id, conversationId: row.conversation_id, userMessageId: row.user_message_id, status: row.status, attempts: row.attempts, ...(row.error ? { error: row.error } : {}), createdAt: row.created_at, updatedAt: row.updated_at };
@@ -52,6 +55,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
     CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       character_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, hidden_at TEXT,
+      last_read_sequence INTEGER NOT NULL DEFAULT 0,
       UNIQUE(user_id, character_id)
     );
     CREATE TABLE IF NOT EXISTS messages (
@@ -72,6 +76,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
 
   const conversationColumns = database.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
   if (!conversationColumns.some((column) => column.name === "hidden_at")) database.exec("ALTER TABLE conversations ADD COLUMN hidden_at TEXT");
+  if (!conversationColumns.some((column) => column.name === "last_read_sequence")) database.exec("ALTER TABLE conversations ADD COLUMN last_read_sequence INTEGER NOT NULL DEFAULT 0");
   const messageColumns = database.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
   if (!messageColumns.some((column) => column.name === "user_id")) database.exec("ALTER TABLE messages ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE");
   if (!messageColumns.some((column) => column.name === "client_message_id")) database.exec("ALTER TABLE messages ADD COLUMN client_message_id TEXT");
@@ -87,11 +92,14 @@ export function createStore(databasePath = config.databasePath): ChatStore {
 
   const ensureUserStatement = database.prepare("INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)");
   const ensureConversationStatement = database.prepare("INSERT OR IGNORE INTO conversations (id, user_id, character_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
-  const findConversationStatement = database.prepare("SELECT id, character_id, created_at, updated_at, hidden_at FROM conversations WHERE user_id = ? AND character_id = ?");
-  const findConversationByIdStatement = database.prepare("SELECT id, character_id, created_at, updated_at, hidden_at FROM conversations WHERE user_id = ? AND id = ?");
+  const findConversationStatement = database.prepare("SELECT id, character_id, created_at, updated_at, hidden_at, last_read_sequence FROM conversations WHERE user_id = ? AND character_id = ?");
+  const findConversationByIdStatement = database.prepare("SELECT id, character_id, created_at, updated_at, hidden_at, last_read_sequence FROM conversations WHERE user_id = ? AND id = ?");
   const updateConversationStatement = database.prepare("UPDATE conversations SET updated_at = ?, hidden_at = NULL WHERE id = ?");
-  const hideConversationStatement = database.prepare("UPDATE conversations SET hidden_at = ?, updated_at = ? WHERE user_id = ? AND character_id = ?");
+  const hideConversationByIdStatement = database.prepare("UPDATE conversations SET hidden_at = ? WHERE user_id = ? AND id = ?");
+  const restoreConversationStatement = database.prepare("UPDATE conversations SET hidden_at = NULL WHERE user_id = ? AND id = ?");
   const deleteMessagesStatement = database.prepare("DELETE FROM messages WHERE conversation_id = (SELECT id FROM conversations WHERE user_id = ? AND character_id = ?)");
+  const resetReadSequenceStatement = database.prepare("UPDATE conversations SET last_read_sequence = 0 WHERE user_id = ? AND character_id = ?");
+  const markConversationReadStatement = database.prepare("UPDATE conversations SET last_read_sequence = COALESCE((SELECT MAX(sequence) FROM messages WHERE conversation_id = conversations.id), 0) WHERE user_id = ? AND id = ?");
   const insertMessageStatement = database.prepare("INSERT INTO messages (id, user_id, conversation_id, client_message_id, role, content, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   const getMessagesStatement = database.prepare("SELECT id, client_message_id, role, content, created_at, status FROM messages WHERE conversation_id = ? ORDER BY sequence ASC");
   const getTasksStatement = database.prepare("SELECT id, conversation_id, user_message_id, status, attempts, error, created_at, updated_at FROM chat_tasks WHERE conversation_id = ? ORDER BY created_at ASC");
@@ -103,7 +111,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
   const updateMessageStatusStatement = database.prepare("UPDATE messages SET status = ? WHERE user_id = ? AND id = ?");
   const getMessageStatement = database.prepare("SELECT id, client_message_id, role, content, created_at, status FROM messages WHERE user_id = ? AND id = ?");
   const countActiveTasksStatement = database.prepare("SELECT COUNT(*) AS count FROM chat_tasks WHERE conversation_id = ? AND status IN ('waiting', 'processing')");
-  const listConversationsStatement = database.prepare(`SELECT conversations.id, conversations.character_id, messages.content, messages.created_at, conversations.hidden_at FROM conversations INNER JOIN messages ON messages.conversation_id = conversations.id WHERE conversations.user_id = ? AND conversations.hidden_at IS NULL AND messages.sequence = (SELECT MAX(last_message.sequence) FROM messages AS last_message WHERE last_message.conversation_id = conversations.id) ORDER BY conversations.updated_at DESC`);
+  const listConversationsStatement = database.prepare(`SELECT conversations.id, conversations.character_id, messages.content, messages.role, messages.created_at, conversations.hidden_at, EXISTS (SELECT 1 FROM messages AS unread_message WHERE unread_message.conversation_id = conversations.id AND unread_message.role = 'assistant' AND unread_message.status = 'completed' AND unread_message.sequence > conversations.last_read_sequence) AS unread FROM conversations INNER JOIN messages ON messages.conversation_id = conversations.id WHERE conversations.user_id = ? AND conversations.hidden_at IS NULL AND messages.sequence = (SELECT MAX(last_message.sequence) FROM messages AS last_message WHERE last_message.conversation_id = conversations.id) ORDER BY conversations.updated_at DESC, conversations.id DESC`);
 
   function ensureConversation(userId: string, characterId: string) {
     const now = new Date().toISOString();
@@ -133,7 +141,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
     },
     listConversations(userId) {
       const rows = listConversationsStatement.all(userId) as unknown as ConversationSummaryRow[];
-      return rows.map(({ id, character_id: characterId, content, created_at: lastMessageAt, hidden_at: hiddenAt }) => ({ id, characterId, lastMessagePreview: content, lastMessageAt, status: hiddenAt ? "hidden" as const : "active" as const }));
+      return rows.map(({ id, character_id: characterId, content, role: lastMessageRole, created_at: lastMessageAt, hidden_at: hiddenAt, unread }) => ({ id, characterId, lastMessagePreview: content, lastMessageAt, lastMessageRole, unread: Boolean(unread), status: hiddenAt ? "hidden" as const : "active" as const }));
     },
     prepareChat(userId, characterId, content, clientMessageId, conversationId) {
       const existing = findUserMessageStatement.get(userId, clientMessageId) as unknown as UserMessageRow | undefined;
@@ -188,10 +196,12 @@ export function createStore(databasePath = config.databasePath): ChatStore {
       return toMessage(row);
     },
     countActiveTasks(conversationId) { return Number((countActiveTasksStatement.get(conversationId) as unknown as { count: number | bigint }).count); },
+    markConversationRead(userId, conversationId) { markConversationReadStatement.run(userId, conversationId); },
+    hideConversation(userId, conversationId) { hideConversationByIdStatement.run(new Date().toISOString(), userId, conversationId); },
+    restoreConversation(userId, conversationId) { restoreConversationStatement.run(userId, conversationId); },
     clearConversation(userId, characterId) {
-      const now = new Date().toISOString();
       deleteMessagesStatement.run(userId, characterId);
-      hideConversationStatement.run(now, now, userId, characterId);
+      resetReadSequenceStatement.run(userId, characterId);
     },
     close() { database.close(); },
   };

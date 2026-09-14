@@ -154,11 +154,11 @@ test("conversation and contact entries resolve to one persistent conversation re
     assert.equal(listData.conversations.length, 1);
     assert.equal(listData.conversations[0].id, contactData.conversation.id);
     assert.deepEqual(listData.conversations[0].character, { id: "momo", name: "Momo", avatar: "🌙", tagline: "温柔、细腻，喜欢听你慢慢说" });
-    assert.equal(listData.conversations[0].lastMessagePreview, "Fake reply to: 你好");
+    assert.equal(listData.conversations[0].lastMessagePreview, "Momo：Fake reply to: 你好");
     assert.equal(listData.conversations[0].status, "active");
     assert.ok(listData.conversations[0].lastMessageAt);
 
-    const hidden = await app.inject({ method: "DELETE", url: "/api/conversations/momo", headers: { cookie: account.cookie } });
+    const hidden = await app.inject({ method: "POST", url: "/api/conversations/momo/hide", headers: { cookie: account.cookie } });
     assert.equal(hidden.statusCode, 200, hidden.body);
     const hiddenList = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
     assert.deepEqual(JSON.parse(hiddenList.body), { conversations: [] });
@@ -174,6 +174,34 @@ test("conversation and contact entries resolve to one persistent conversation re
     assert.equal(restored.statusCode, 200, restored.body);
     const restoredList = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
     assert.equal(JSON.parse(restoredList.body).conversations[0].id, contactData.conversation.id);
+    const cleared = await app.inject({ method: "DELETE", url: "/api/conversations/momo", headers: { cookie: account.cookie } });
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    const afterClear = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${contactData.conversation.id}`, headers: { cookie: account.cookie } })).body) as { conversation: { id: string; status: string }; messages: ChatMessage[] };
+    assert.equal(afterClear.conversation.id, contactData.conversation.id);
+    assert.equal(afterClear.conversation.status, "active");
+    assert.deepEqual(afterClear.messages, []);
+  } finally { await app.close(); store.close(); }
+});
+
+test("conversation summaries are ordered, labeled, truncated and retain unread state", async () => {
+  const { app, store } = await setup();
+  try {
+    const account = await register(app);
+    const longContent = "这是一段非常长的消息".repeat(20);
+    await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "momo", content: longContent } });
+    await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "loki", content: "Loki 的消息" } });
+    const list = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } })).body) as { conversations: Array<{ character: { id: string; name: string }; lastMessagePreview: string; unread: boolean }> };
+    assert.deepEqual(list.conversations.map((conversation) => conversation.character.id), ["loki", "momo"]);
+    assert.equal(list.conversations[0].lastMessagePreview, "Loki：Fake reply to: Loki 的消息");
+    assert.match(list.conversations[1].lastMessagePreview, /^Momo：Fake reply to: /);
+    assert.ok(list.conversations[1].lastMessagePreview.length <= 86);
+    assert.equal(list.conversations.every((conversation) => conversation.unread), true);
+
+    const momoId = list.conversations.find((conversation) => conversation.character.id === "momo")!.character.id;
+    const read = await app.inject({ method: "POST", url: `/api/conversations/${momoId}/read`, headers: { cookie: account.cookie } });
+    assert.equal(read.statusCode, 200, read.body);
+    const afterRead = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } })).body) as { conversations: Array<{ character: { id: string }; unread: boolean }> };
+    assert.equal(afterRead.conversations.find((conversation) => conversation.character.id === "momo")?.unread, false);
   } finally { await app.close(); store.close(); }
 });
 

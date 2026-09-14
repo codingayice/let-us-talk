@@ -5,12 +5,13 @@ import { fromNodeHeaders } from "better-auth/node";
 import { z } from "zod";
 import type { ChatRequest, ConversationSummary, PublicCharacter } from "@let-us-talk/shared";
 import { type AuthInstance } from "./auth.js";
-import { characters, findCharacter } from "./characters.js";
+import { characters, findCharacter, formatConversationPreview } from "./characters.js";
 import { type ChatModel } from "./model.js";
 import { createStore, type ChatStore } from "./store.js";
 import { ChatService, ChatServiceError } from "./chat-service.js";
+import type { ConversationEventBus } from "./conversation-events.js";
 
-interface AppDependencies { chatModel: ChatModel; store: ChatStore; auth: AuthInstance; chatService?: ChatService }
+interface AppDependencies { chatModel: ChatModel; store: ChatStore; auth: AuthInstance; chatService?: ChatService; conversationEvents?: ConversationEventBus }
 
 export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyInstance {
   const store = dependencies.store ?? createStore();
@@ -84,9 +85,10 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
       return [{
         id: summary.id,
         character,
-        lastMessagePreview: summary.lastMessagePreview,
+        lastMessagePreview: formatConversationPreview(character.name, summary.lastMessageRole, summary.lastMessagePreview),
         lastMessageAt: summary.lastMessageAt,
         status: summary.status,
+        unread: summary.unread,
       }];
     });
     return { conversations };
@@ -115,6 +117,41 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     return { ok: true };
   });
 
+  app.post<{ Params: { characterId: string } }>("/api/conversations/:characterId/hide", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!findCharacter(request.params.characterId)) return reply.code(404).send({ error: "Character not found" });
+    const conversation = store.getConversation(user.id, request.params.characterId);
+    store.hideConversation(user.id, conversation.conversation.id);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { characterId: string } }>("/api/conversations/:characterId/restore", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!findCharacter(request.params.characterId)) return reply.code(404).send({ error: "Character not found" });
+    const conversation = store.getConversation(user.id, request.params.characterId);
+    store.restoreConversation(user.id, conversation.conversation.id);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { characterId: string } }>("/api/conversations/:characterId/read", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!findCharacter(request.params.characterId)) return reply.code(404).send({ error: "Character not found" });
+    const conversation = store.getConversation(user.id, request.params.characterId);
+    store.markConversationRead(user.id, conversation.conversation.id);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { conversationId: string } }>("/api/conversations/by-id/:conversationId/read", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!store.getConversationById(user.id, request.params.conversationId)) return reply.code(404).send({ error: "Conversation not found" });
+    store.markConversationRead(user.id, request.params.conversationId);
+    return { ok: true };
+  });
+
   const chatSchema = z.object({ characterId: z.string().min(1), conversationId: z.string().uuid().optional(), content: z.string().trim().min(1).max(4000), messageId: z.string().uuid().optional() });
   app.post<{ Body: ChatRequest }>("/api/chat", async (request, reply) => {
     const user = await requireUser(request, reply);
@@ -129,7 +166,7 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     if (!conversationDetails || conversationDetails.conversation.characterId !== character.id) return reply.code(404).send({ error: "Conversation not found" });
     const clientMessageId = parsed.data.messageId ?? crypto.randomUUID();
     try {
-      return await chatService.submit({
+      const response = await chatService.submit({
         userId: user.id,
         characterId: character.id,
         conversationId: conversationDetails.conversation.id,
@@ -137,6 +174,8 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
         clientMessageId,
         systemPrompt: character.systemPrompt,
       });
+      dependencies.conversationEvents?.publishCompleted({ userId: user.id, conversationId: conversationDetails.conversation.id });
+      return response;
     } catch (error) {
       request.log.error(error, "chat model request failed");
       const statusCode = error instanceof ChatServiceError ? error.statusCode : 502;

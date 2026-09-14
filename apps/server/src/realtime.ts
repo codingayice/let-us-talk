@@ -1,6 +1,6 @@
 import { fromNodeHeaders } from "better-auth/node";
 import type { AuthInstance } from "./auth.js";
-import { findCharacter } from "./characters.js";
+import { findCharacter, formatConversationPreview } from "./characters.js";
 import type { ChatModel } from "./model.js";
 import type { ChatMessage, ChatTask, ConversationSummary } from "@let-us-talk/shared";
 import { Server, type Socket } from "socket.io";
@@ -8,12 +8,14 @@ import { z } from "zod";
 import type { Server as HttpServer } from "node:http";
 import { ChatService, ChatServiceError } from "./chat-service.js";
 import type { ChatStore } from "./store.js";
+import type { ConversationEventBus } from "./conversation-events.js";
 
 interface RealtimeDependencies {
   auth: AuthInstance;
   chatModel: ChatModel;
   store: ChatStore;
   chatService?: ChatService;
+  conversationEvents?: ConversationEventBus;
 }
 
 const chatCommandSchema = z.object({
@@ -30,14 +32,16 @@ type JoinAcknowledgment = { ok: true } | { ok: false; error: string };
 type ChatCommand = z.infer<typeof chatCommandSchema>;
 
 function conversationRoom(conversationId: string) { return `conversation:${conversationId}`; }
+function userRoom(userId: string) { return `user:${userId}`; }
 
 function summaryForUser(store: ChatStore, userId: string, conversationId: string): ConversationSummary | undefined {
   const summary = store.listConversations(userId).find((item) => item.id === conversationId);
   if (!summary) return undefined;
   const character = findCharacter(summary.characterId);
   if (!character) return undefined;
-  const { systemPrompt: _, ...publicCharacter } = character;
-  return { ...summary, character: publicCharacter };
+  const { systemPrompt: _systemPrompt, ...publicCharacter } = character;
+  const { lastMessageRole: _lastMessageRole, ...publicSummary } = summary;
+  return { ...publicSummary, character: publicCharacter, lastMessagePreview: formatConversationPreview(character.name, summary.lastMessageRole, summary.lastMessagePreview) };
 }
 
 function socketHeaders(socket: Socket) { return fromNodeHeaders(socket.handshake.headers as Record<string, string | undefined>); }
@@ -91,6 +95,8 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
         },
         completed: (response, task) => {
           emitEvent(room, "chat:completed", { conversationId: command.conversationId, messageId: response.userMessage.clientMessageId ?? response.userMessage.id, userMessage: response.userMessage, assistantMessage: response.assistantMessage, task, summary: summaryForUser(dependencies.store, userId, command.conversationId) });
+          const summary = summaryForUser(dependencies.store, userId, command.conversationId);
+          if (summary) emitEvent(userRoom(userId), "conversation:updated", { summary });
           emitEvent(room, "chat:typing", { conversationId: command.conversationId, messageId: response.userMessage.clientMessageId ?? response.userMessage.id, typing: false });
         },
         failed: (userMessage, task, error) => {
@@ -106,6 +112,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
   }
 
   io.on("connection", (socket) => {
+    socket.join(userRoom(socket.data.userId as string));
     socket.on("conversation:join", (rawCommand: unknown, acknowledge?: (value: JoinAcknowledgment) => void) => {
       const parsed = z.object({ conversationId: z.string().uuid(), characterId: z.string().min(1) }).safeParse(rawCommand);
       if (!parsed.success) { acknowledge?.({ ok: false, error: "Invalid conversation command" }); return; }
@@ -122,6 +129,15 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
       void handleChat(socket, parsed.data, respond);
     });
   });
+
+  if (dependencies.conversationEvents) {
+    const onCompleted = ({ userId, conversationId }: { userId: string; conversationId: string }) => {
+      const summary = summaryForUser(dependencies.store, userId, conversationId);
+      if (summary) emitEvent(userRoom(userId), "conversation:updated", { summary });
+    };
+    dependencies.conversationEvents.on("completed", onCompleted);
+    io.once("close", () => dependencies.conversationEvents?.off("completed", onCompleted));
+  }
 
   return io;
 }
