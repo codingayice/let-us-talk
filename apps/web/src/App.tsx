@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Character, ChatMessage, ChatResponse } from "@let-us-talk/shared";
 import {
   Avatar,
@@ -37,6 +37,8 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
 
   const selected = useMemo(
     () => characters.find((character) => character.id === selectedId) ?? fallbackCharacters[0],
@@ -78,6 +80,8 @@ export function App() {
     const content = value.trim();
     if (!content || sending) return;
 
+    const requestCharacterId = selectedId;
+
     setDraft("");
     setErrorMessage("");
     setSending(true);
@@ -93,19 +97,21 @@ export function App() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ characterId: selectedId, content }),
+        body: JSON.stringify({ characterId: requestCharacterId, content }),
       });
       if (!response.ok) {
         const error = await response.json().catch(() => ({ error: "请求失败" }));
         throw new Error(error.error ?? "请求失败");
       }
       const data = (await response.json()) as ChatResponse;
+      if (selectedIdRef.current !== requestCharacterId) return;
       setMessages((current) => [
         ...current.filter((message) => message.id !== userMessage.id),
         data.userMessage,
         data.assistantMessage,
       ]);
     } catch (error) {
+      if (selectedIdRef.current !== requestCharacterId) return;
       setMessages((current) => current.filter((message) => message.id !== userMessage.id));
       setErrorMessage(error instanceof Error ? error.message : "请求失败");
     } finally {
@@ -132,6 +138,7 @@ export function App() {
                 name={character.name}
                 info={character.tagline}
                 active={character.id === selected.id}
+                data-character-id={character.id}
                 onClick={() => setSelectedId(character.id)}
               >
                 <Avatar name={character.name} src={avatarSource(character)} />

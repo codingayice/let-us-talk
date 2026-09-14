@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "concurrently -k \"pnpm --filter @let-us-talk/server dev\" \"pnpm --filter @let-us-talk/web dev\"",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "concurrently": "^9.2.1"
   }
 }

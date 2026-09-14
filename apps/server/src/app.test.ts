@@ -149,3 +149,64 @@ test("different anonymous users cannot see each other's messages", async () => {
     store.close();
   }
 });
+
+test("lists the fixed AI contacts and keeps each contact history isolated", async () => {
+  const store = createStore(":memory:");
+  const { model, calls } = createFakeModel();
+  const app = buildApp({ store, chatModel: model });
+
+  try {
+    const contacts = await app.inject({ method: "GET", url: "/api/characters" });
+    assert.equal(contacts.statusCode, 200);
+    const contactBody = JSON.parse(contacts.body) as Array<{ id: string; name: string; avatar: string; systemPrompt?: string }>;
+    assert.deepEqual(
+      contactBody.map(({ id, name, avatar }) => ({ id, name, avatar })),
+      [
+        { id: "momo", name: "Momo", avatar: "🌙" },
+        { id: "loki", name: "Loki", avatar: "🦊" },
+        { id: "nora", name: "Nora", avatar: "☕" },
+      ],
+    );
+    assert.equal(contactBody.some((character) => "systemPrompt" in character), false);
+
+    const cookie = sessionCookie(await app.inject({ method: "GET", url: "/api/conversations/momo" }));
+    await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      headers: { cookie },
+      payload: { characterId: "momo", content: "月亮" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/chat",
+      headers: { cookie },
+      payload: { characterId: "loki", content: "狐狸" },
+    });
+
+    const momoHistory = await app.inject({
+      method: "GET",
+      url: "/api/conversations/momo",
+      headers: { cookie },
+    });
+    const lokiHistory = await app.inject({
+      method: "GET",
+      url: "/api/conversations/loki",
+      headers: { cookie },
+    });
+    assert.deepEqual(
+      JSON.parse(momoHistory.body).messages.map(({ content }: ChatMessage) => content),
+      ["月亮", "Fake reply to: 月亮"],
+    );
+    assert.deepEqual(
+      JSON.parse(lokiHistory.body).messages.map(({ content }: ChatMessage) => content),
+      ["狐狸", "Fake reply to: 狐狸"],
+    );
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].systemPrompt.includes("Momo"), true);
+    assert.equal(calls[1].systemPrompt.includes("Loki"), true);
+    assert.deepEqual(calls[1].messages.map(({ content }) => content), ["狐狸"]);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
