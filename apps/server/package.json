@@ -1,0 +1,27 @@
+{
+  "name": "@let-us-talk/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.48",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/cors": "^11.0.1",
+    "@let-us-talk/shared": "workspace:*",
+    "ai": "^7.0.99",
+    "dotenv": "^17.2.2",
+    "fastify": "^5.6.1",
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

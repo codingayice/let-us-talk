@@ -1,0 +1,13 @@
+{
+  "name": "let-us-talk",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "concurrently -k \"pnpm --filter @let-us-talk/server dev\" \"pnpm --filter @let-us-talk/web dev\"",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
