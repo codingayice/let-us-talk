@@ -1,7 +1,7 @@
 import { fromNodeHeaders } from "better-auth/node";
 import { authSessionEvents, type AuthInstance } from "./auth.js";
 import { findCharacter, formatConversationPreview } from "./characters.js";
-import type { ChatModel } from "./model.js";
+import { modelErrorResponse, validateModelConfig, type ChatModel, type ModelErrorCategory } from "./model.js";
 import type { ChatMessage, ChatTask, ConversationSummary } from "@let-us-talk/shared";
 import { Server, type Socket } from "socket.io";
 import { z } from "zod";
@@ -23,16 +23,18 @@ const chatCommandSchema = z.object({
   conversationId: z.string().uuid(),
   content: z.string().trim().min(1).max(4000),
   messageId: z.string().uuid().optional(),
+  modelConfig: z.unknown().optional(),
 });
 const retryCommandSchema = z.object({
   characterId: z.string().min(1),
   conversationId: z.string().uuid(),
   messageId: z.string().uuid(),
+  modelConfig: z.unknown().optional(),
 });
 
 type ChatAcknowledgment =
   | { ok: true; userMessage: ChatMessage; task?: ChatTask }
-  | { ok: false; error: string };
+  | { ok: false; error: string; code?: ModelErrorCategory; category?: ModelErrorCategory };
 type JoinAcknowledgment = { ok: true } | { ok: false; error: string };
 type ChatCommand = z.infer<typeof chatCommandSchema>;
 type RetryCommand = z.infer<typeof retryCommandSchema>;
@@ -90,6 +92,14 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
 
   async function handleChat(socket: Socket, command: ChatCommand, acknowledge: (value: ChatAcknowledgment) => void) {
     const userId = socket.data.userId as string;
+    let modelConfig: Parameters<ChatModel["reply"]>[0]["modelConfig"];
+    try {
+      modelConfig = validateModelConfig(command.modelConfig);
+    } catch (error) {
+      const safeError = modelErrorResponse(error);
+      acknowledge({ ok: false, error: safeError.error, code: safeError.code, category: safeError.category });
+      return;
+    }
     const character = findCharacter(command.characterId);
     if (!character) { acknowledge({ ok: false, error: "Character not found" }); return; }
     const details = dependencies.store.getConversationById(userId, command.conversationId);
@@ -105,6 +115,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
         content: command.content,
         clientMessageId: command.messageId ?? crypto.randomUUID(),
         systemPrompt: character.systemPrompt,
+        modelConfig,
       }, {
         accepted: (userMessage, task) => {
           acknowledged = true;
@@ -121,15 +132,15 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
           if (summary) emitEvent(userRoom(userId), "conversation:updated", { summary });
           emitEvent(room, "chat:typing", { conversationId: command.conversationId, messageId: response.userMessage.clientMessageId ?? response.userMessage.id, typing: false });
         },
-        failed: (userMessage, task, error) => {
-          emitEvent(room, "chat:failed", { conversationId: command.conversationId, messageId: userMessage.clientMessageId ?? userMessage.id, userMessage, task, error });
+        failed: (userMessage, task, error, category) => {
+          emitEvent(room, "chat:failed", { conversationId: command.conversationId, messageId: userMessage.clientMessageId ?? userMessage.id, userMessage, task, error, ...(category ? { code: category, category } : {}) });
           emitEvent(room, "chat:typing", { conversationId: command.conversationId, messageId: userMessage.clientMessageId ?? userMessage.id, typing: false });
         },
       });
     } catch (error) {
       if (acknowledged) return;
-      const message = error instanceof Error ? error.message : "请求失败";
-      acknowledge({ ok: false, error: error instanceof ChatServiceError ? message : "请求失败" });
+      const safeError = error instanceof ChatServiceError ? { error: error.message, code: error.category, category: error.category } : modelErrorResponse(error);
+      acknowledge({ ok: false, error: safeError.error, code: safeError.code, category: safeError.category });
     }
   }
 
@@ -182,6 +193,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
         conversationId: retry.conversationId,
         content: existing.message.content,
         messageId: existing.message.clientMessageId ?? existing.message.id,
+        modelConfig: retry.modelConfig,
       }, respond);
     });
   });

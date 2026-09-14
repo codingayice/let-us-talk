@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Character, ChatMessage, ChatResponse, ChatTask, ConversationSummary } from "@let-us-talk/shared";
 import { io, type Socket } from "socket.io-client";
+import { ModelSettings } from "./ModelSettings.js";
+import { readModelConfig, type ModelConfig } from "./model-config.js";
 import {
   Avatar,
   ChatContainer,
@@ -77,7 +79,7 @@ function userFacingError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content?: string; messageId: string }, seenEventIds: Set<string>, command: "chat:send" | "chat:retry" = "chat:send") {
+function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content?: string; messageId: string; modelConfig: ModelConfig }, seenEventIds: Set<string>, command: "chat:send" | "chat:retry" = "chat:send") {
   return new Promise<ChatResponse>((resolve, reject) => {
     let acknowledged = false;
     const cleanup = () => {
@@ -160,6 +162,7 @@ export function App() {
   const [authNotice, setAuthNotice] = useState("");
   const [characters, setCharacters] = useState<Character[]>(fallbackCharacters);
   const [activePanel, setActivePanel] = useState<"conversations" | "contacts" | "settings">("contacts");
+  const [modelConfig, setModelConfig] = useState<ModelConfig | null>(() => readModelConfig());
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState("momo");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
@@ -192,6 +195,7 @@ export function App() {
   const loadedConversationKeyRef = useRef("");
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const readConversationIdsRef = useRef(new Set<string>());
+  const onModelConfigChange = useCallback((next: ModelConfig | null) => setModelConfig(next), []);
   selectedIdRef.current = selectedId;
   selectedConversationIdRef.current = selectedConversationId;
 
@@ -532,6 +536,13 @@ export function App() {
     const content = value.trim();
     if (!content || sending) return;
 
+    const requestModelConfig = modelConfig ?? readModelConfig();
+    if (!requestModelConfig) {
+      setErrorMessage("请先前往设置保存模型配置");
+      setActivePanel("settings");
+      return;
+    }
+
     const requestCharacterId = selectedId;
     const requestConversationId = selectedConversationId;
 
@@ -562,12 +573,12 @@ export function App() {
       let data: ChatResponse;
       const socket = socketRef.current;
       if (socket?.connected && requestConversationId) {
-        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, ...(retryAssistant ? {} : { content }), messageId: userMessage.id }, seenEventIdsRef.current, retryAssistant ? "chat:retry" : "chat:send");
+        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, ...(retryAssistant ? {} : { content }), messageId: userMessage.id, modelConfig: requestModelConfig }, seenEventIdsRef.current, retryAssistant ? "chat:retry" : "chat:send");
       } else {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ characterId: requestCharacterId, ...(requestConversationId ? { conversationId: requestConversationId } : {}), content, messageId: userMessage.id }),
+          body: JSON.stringify({ characterId: requestCharacterId, ...(requestConversationId ? { conversationId: requestConversationId } : {}), content, messageId: userMessage.id, modelConfig: requestModelConfig }),
         });
         if (!response.ok) {
           const error = await response.json().catch(() => ({ error: "请求失败" }));
@@ -724,6 +735,7 @@ export function App() {
             <div className="im-settings-panel">
               <div className="im-section-title">设置</div>
               <div className="im-settings-user"><strong>{authUser.name}</strong><span>{authUser.email}</span></div>
+              <ModelSettings onConfigChange={onModelConfigChange} />
               <button type="button" className="im-settings-action" onClick={openProfile}>账号资料</button>
               <button type="button" className="im-settings-action" onClick={openPasswordManagement}>密码管理</button>
               <button type="button" className="im-settings-action" onClick={() => setAboutOpen(true)}>关于与说明</button>

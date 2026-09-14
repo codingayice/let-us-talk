@@ -6,18 +6,18 @@ import { z } from "zod";
 import type { ChatRequest, ConversationSummary, PublicCharacter } from "@let-us-talk/shared";
 import { type AuthInstance } from "./auth.js";
 import { characters, findCharacter, formatConversationPreview } from "./characters.js";
-import { type ChatModel } from "./model.js";
+import { chatModel as defaultChatModel, modelErrorResponse, toModelError, validateModelConfig, withModelTimeout, type ChatModel } from "./model.js";
+import { config } from "./config.js";
 import { createStore, type ChatStore } from "./store.js";
 import { ChatService, ChatServiceError } from "./chat-service.js";
 import type { ConversationEventBus } from "./conversation-events.js";
 
-interface AppDependencies { chatModel: ChatModel; store: ChatStore; auth: AuthInstance; chatService?: ChatService; conversationEvents?: ConversationEventBus }
+interface AppDependencies { chatModel?: ChatModel; store: ChatStore; auth: AuthInstance; chatService?: ChatService; conversationEvents?: ConversationEventBus }
 
 export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyInstance {
   const store = dependencies.store ?? createStore();
-  const chatModel = dependencies.chatModel;
+  const chatModel = dependencies.chatModel ?? defaultChatModel;
   const authInstance = dependencies.auth;
-  if (!chatModel) throw new Error("A chat model is required");
   if (!authInstance) throw new Error("An auth instance is required");
   const auth = authInstance;
   const chatService = dependencies.chatService ?? new ChatService(store, chatModel);
@@ -152,7 +152,7 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     return { ok: true };
   });
 
-  const chatSchema = z.object({ characterId: z.string().min(1), conversationId: z.string().uuid().optional(), content: z.string().trim().min(1).max(4000), messageId: z.string().uuid().optional() });
+  const chatSchema = z.object({ characterId: z.string().min(1), conversationId: z.string().uuid().optional(), content: z.string().trim().min(1).max(4000), messageId: z.string().uuid().optional(), modelConfig: z.unknown().optional() });
   app.post<{ Body: ChatRequest }>("/api/chat", async (request, reply) => {
     const user = await requireUser(request, reply);
     if (!user) return;
@@ -160,6 +160,12 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     if (!parsed.success) return reply.code(400).send({ error: "Invalid chat request" });
     const character = findCharacter(parsed.data.characterId);
     if (!character) return reply.code(404).send({ error: "Character not found" });
+    let modelConfig: ChatRequest["modelConfig"];
+    try {
+      modelConfig = validateModelConfig(parsed.data.modelConfig);
+    } catch (error) {
+      return reply.code(400).send(modelErrorResponse(error));
+    }
     const conversationDetails = parsed.data.conversationId
       ? store.getConversationById(user.id, parsed.data.conversationId)
       : store.getConversation(user.id, character.id);
@@ -173,13 +179,40 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
         content: parsed.data.content,
         clientMessageId,
         systemPrompt: character.systemPrompt,
+        modelConfig,
       });
       dependencies.conversationEvents?.publishCompleted({ userId: user.id, conversationId: conversationDetails.conversation.id });
       return response;
     } catch (error) {
-      request.log.error(error, "chat model request failed");
       const statusCode = error instanceof ChatServiceError ? error.statusCode : 502;
-      return reply.code(statusCode).send({ error: error instanceof Error ? error.message : "AI 暂时不可用，请稍后再试" });
+      request.log.warn({ category: error instanceof ChatServiceError ? error.category : toModelError(error).category }, "chat model request failed");
+      return reply.code(statusCode).send(error instanceof ChatServiceError ? { error: error.message, code: error.category, category: error.category } : modelErrorResponse(error));
+    }
+  });
+
+  app.post("/api/model/test", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    const body = request.body as { config?: unknown } | undefined;
+    let modelConfig: ChatRequest["modelConfig"];
+    try {
+      modelConfig = validateModelConfig(body?.config);
+    } catch (error) {
+      return reply.code(400).send(modelErrorResponse(error));
+    }
+    const startedAt = performance.now();
+    try {
+      const text = await withModelTimeout(chatModel.reply({
+        systemPrompt: "你是连接测试助手。请用一个简短词语确认连接。",
+        messages: [{ role: "user", content: "请回复：连接成功" }],
+        modelConfig,
+      }), config.llmTimeoutMs);
+      if (!text.trim()) throw new Error("empty model response");
+      return { ok: true, latencyMs: Math.max(0, Math.round(performance.now() - startedAt)) };
+    } catch (error) {
+      const safeError = modelErrorResponse(error);
+      request.log.warn({ category: safeError.category }, "model connection test failed");
+      return reply.code(safeError.category === "timeout" ? 504 : 502).send(safeError);
     }
   });
 

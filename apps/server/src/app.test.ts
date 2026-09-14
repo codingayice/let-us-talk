@@ -6,6 +6,8 @@ import { createAuth, devResetTokens } from "./auth.js";
 import type { ChatModel } from "./model.js";
 import { createStore } from "./store.js";
 
+const testModelConfig = { baseUrl: "https://provider.example/v1", apiKey: "test-secret", model: "test-model" };
+
 function createFakeModel(): ChatModel {
   return { async reply(input) { return `Fake reply to: ${input.messages.at(-1)?.content}`; } };
 }
@@ -109,7 +111,7 @@ test("authenticated conversations remain isolated by formal user id", async () =
     const first = await register(app);
     const second = await register(app);
     for (const [cookie, content] of [[first.cookie, "属于第一个"], [second.cookie, "属于第二个"]]) {
-      const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { characterId: "momo", content } });
+      const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { characterId: "momo", content, modelConfig: testModelConfig } });
       assert.equal(response.statusCode, 200, response.body);
     }
     const firstHistory = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie: first.cookie } })).body).messages as ChatMessage[];
@@ -145,7 +147,7 @@ test("conversation and contact entries resolve to one persistent conversation re
       method: "POST",
       url: "/api/chat",
       headers: { cookie: account.cookie },
-      payload: { characterId: "momo", conversationId: contactData.conversation.id, content: "你好" },
+      payload: { characterId: "momo", conversationId: contactData.conversation.id, content: "你好", modelConfig: testModelConfig },
     });
     assert.equal(chat.statusCode, 200, chat.body);
 
@@ -169,7 +171,7 @@ test("conversation and contact entries resolve to one persistent conversation re
       method: "POST",
       url: "/api/chat",
       headers: { cookie: account.cookie },
-      payload: { characterId: "momo", conversationId: contactData.conversation.id, content: "再次见面" },
+      payload: { characterId: "momo", conversationId: contactData.conversation.id, content: "再次见面", modelConfig: testModelConfig },
     });
     assert.equal(restored.statusCode, 200, restored.body);
     const restoredList = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
@@ -188,8 +190,8 @@ test("conversation summaries are ordered, labeled, truncated and retain unread s
   try {
     const account = await register(app);
     const longContent = "这是一段非常长的消息".repeat(20);
-    await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "momo", content: longContent } });
-    await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "loki", content: "Loki 的消息" } });
+    await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "momo", content: longContent, modelConfig: testModelConfig } });
+    await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "loki", content: "Loki 的消息", modelConfig: testModelConfig } });
     const list = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } })).body) as { conversations: Array<{ character: { id: string; name: string }; lastMessagePreview: string; unread: boolean }> };
     assert.deepEqual(list.conversations.map((conversation) => conversation.character.id), ["loki", "momo"]);
     assert.equal(list.conversations[0].lastMessagePreview, "Loki：Fake reply to: Loki 的消息");
@@ -214,7 +216,61 @@ test("conversation ids cannot be used across accounts", async () => {
     const conversationId = (JSON.parse(created.body) as { conversation: { id: string } }).conversation.id;
     const response = await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie: second.cookie } });
     assert.equal(response.statusCode, 404);
-    const chat = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: second.cookie }, payload: { characterId: "momo", conversationId, content: "越权" } });
+    const chat = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: second.cookie }, payload: { characterId: "momo", conversationId, content: "越权", modelConfig: testModelConfig } });
     assert.equal(chat.statusCode, 404);
+  } finally { await app.close(); store.close(); }
+});
+
+test("model connection test is authenticated, request-scoped and does not create chat data", async () => {
+  const seen: Array<{ baseUrl?: string; apiKey?: string; model?: string; messages: string[] }> = [];
+  const { app, store } = await (async () => {
+    const store = createStore(":memory:");
+    const auth = await createAuth(":memory:");
+    const app = buildApp({ store, auth, chatModel: { async reply(input) {
+      seen.push({ baseUrl: input.modelConfig?.baseUrl, apiKey: input.modelConfig?.apiKey, model: input.modelConfig?.model, messages: input.messages.map((message) => message.content) });
+      return "连接成功";
+    } } });
+    return { app, store };
+  })();
+  try {
+    assert.equal((await app.inject({ method: "POST", url: "/api/model/test", payload: { config: testModelConfig } })).statusCode, 401);
+    const account = await register(app);
+    const response = await app.inject({ method: "POST", url: "/api/model/test", headers: { cookie: account.cookie }, payload: { config: testModelConfig } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(JSON.parse(response.body), { ok: true, latencyMs: JSON.parse(response.body).latencyMs });
+    assert.deepEqual(seen, [{ baseUrl: testModelConfig.baseUrl, apiKey: testModelConfig.apiKey, model: testModelConfig.model, messages: ["请回复：连接成功"] }]);
+    assert.equal(response.body.includes(testModelConfig.apiKey), false);
+    assert.deepEqual(JSON.parse((await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } })).body), { conversations: [] });
+  } finally { await app.close(); store.close(); }
+});
+
+test("missing and invalid model config are rejected before chat persistence", async () => {
+  const { app, store } = await setup();
+  try {
+    const account = await register(app);
+    const missing = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "momo", content: "不会落库" } });
+    assert.equal(missing.statusCode, 400);
+    assert.equal(JSON.parse(missing.body).category, "config_missing");
+    const invalid = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie: account.cookie }, payload: { characterId: "momo", content: "不会落库", modelConfig: { ...testModelConfig, baseUrl: "ftp://provider.example" } } });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(JSON.parse(invalid.body).category, "config_invalid");
+    assert.deepEqual(JSON.parse((await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } })).body), { conversations: [] });
+  } finally { await app.close(); store.close(); }
+});
+
+test("provider authentication errors are categorized and sanitized", async () => {
+  const { app, store } = await (async () => {
+    const store = createStore(":memory:");
+    const auth = await createAuth(":memory:");
+    const app = buildApp({ store, auth, chatModel: { async reply() { throw Object.assign(new Error(`provider leaked ${testModelConfig.apiKey}`), { statusCode: 401 }); } } });
+    return { app, store };
+  })();
+  try {
+    const account = await register(app);
+    const response = await app.inject({ method: "POST", url: "/api/model/test", headers: { cookie: account.cookie }, payload: { config: testModelConfig } });
+    const body = JSON.parse(response.body) as { category: string; error: string };
+    assert.equal(response.statusCode, 502);
+    assert.equal(body.category, "authentication_failed");
+    assert.equal(response.body.includes(testModelConfig.apiKey), false);
   } finally { await app.close(); store.close(); }
 });

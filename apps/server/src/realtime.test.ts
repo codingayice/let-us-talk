@@ -9,6 +9,8 @@ import { createStore } from "./store.js";
 import { attachRealtimeChat } from "./realtime.js";
 import { ConversationEventBus } from "./conversation-events.js";
 
+const testModelConfig = { baseUrl: "https://provider.example/v1", apiKey: "test-secret", model: "test-model" };
+
 function waitForEvent<T>(socket: Socket, event: string) {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${event}`)), 2_000);
@@ -55,7 +57,7 @@ test("REST chat publishes a conversation update to the authenticated realtime cl
   const socket = await connect(url, cookie);
   try {
     const updated = waitForEvent<{ summary: { id: string; lastMessagePreview: string } }>(socket, "conversation:updated");
-    const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { conversationId, characterId: "momo", content: "来自 HTTP" } });
+    const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { conversationId, characterId: "momo", content: "来自 HTTP", modelConfig: testModelConfig } });
     assert.equal(response.statusCode, 200, response.body);
     const event = await updated;
     assert.equal(event.summary.id, conversationId);
@@ -115,7 +117,7 @@ test("chat:send confirms persistence before starting the model and emits a compl
   const socket = await connect(url, cookie);
   try {
     const accepted = new Promise<{ ok: boolean; userMessage?: ChatMessage }>((resolve) => {
-      socket.emit("chat:send", { conversationId, characterId: "momo", content: "你好", messageId: crypto.randomUUID() }, resolve);
+      socket.emit("chat:send", { conversationId, characterId: "momo", content: "你好", messageId: crypto.randomUUID(), modelConfig: testModelConfig }, resolve);
     });
     await deferred.modelStarted;
     const acknowledgment = await accepted;
@@ -151,11 +153,12 @@ test("chat:send rejects unauthenticated sockets and persists a user message when
     try {
       const failed = waitForEvent<{ error: string; userMessage: ChatMessage }>(socket, "chat:failed");
       const acknowledgment = await new Promise<{ ok: boolean }>((resolve) => {
-        socket.emit("chat:send", { conversationId, characterId: "loki", content: "测试失败" }, resolve);
+        socket.emit("chat:send", { conversationId, characterId: "loki", content: "测试失败", modelConfig: testModelConfig }, resolve);
       });
       assert.equal(acknowledgment.ok, true);
       const result = await failed;
-      assert.equal(result.error, "AI 暂时不可用，请稍后再试");
+      assert.equal(result.error, "模型服务请求失败，请稍后重试");
+      assert.equal((result as { category?: string }).category, "provider_request_failed");
       const history = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie } })).body) as { messages: ChatMessage[] };
       assert.deepEqual(history.messages.map((message) => message.content), ["测试失败"]);
     } finally {
@@ -210,13 +213,13 @@ test("chat:retry reruns only a failed AI reply without duplicating the user mess
   try {
     const failed = waitForEvent<{ messageId: string }>(socket, "chat:failed");
     await new Promise<{ ok: boolean }>((resolve) => {
-      socket.emit("chat:send", { conversationId, characterId: "nora", content: "请重试", messageId }, resolve);
+      socket.emit("chat:send", { conversationId, characterId: "nora", content: "请重试", messageId, modelConfig: testModelConfig }, resolve);
     });
     assert.equal((await failed).messageId, messageId);
 
     const completed = waitForEvent<{ assistantMessage: ChatMessage }>(socket, "chat:completed");
     const acknowledgment = await new Promise<{ ok: boolean }>((resolve) => {
-      socket.emit("chat:retry", { conversationId, characterId: "nora", messageId }, resolve);
+      socket.emit("chat:retry", { conversationId, characterId: "nora", messageId, modelConfig: testModelConfig }, resolve);
     });
     assert.equal(acknowledgment.ok, true);
     assert.equal((await completed).assistantMessage.content, "reply: 请重试");

@@ -52,7 +52,7 @@ test("an AI failure keeps the user message and an explicit retry reuses its clie
   const { store, service, momo } = setup({ async reply() { calls += 1; if (calls <= 2) throw new Error("down"); return "恢复"; } });
   const messageId = "00000000-0000-4000-8000-000000000003";
   try {
-    await assert.rejects(service.submit(job("momo", momo, messageId)), /AI 暂时不可用/);
+    await assert.rejects(service.submit(job("momo", momo, messageId)), /模型服务请求失败/);
     const failed = store.getConversationById("user-1", momo);
     assert.ok(failed);
     assert.equal(failed.messages.length, 1);
