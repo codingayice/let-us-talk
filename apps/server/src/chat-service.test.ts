@@ -92,6 +92,36 @@ test("different conversations can process in parallel while one conversation rem
   } finally { releases.splice(0).forEach((release) => release()); store.close(); }
 });
 
+test("clearing a conversation invalidates an in-flight reply", async () => {
+  let release!: () => void;
+  let started!: () => void;
+  const modelStarted = new Promise<void>((resolve) => { started = resolve; });
+  const modelReleased = new Promise<void>((resolve) => { release = resolve; });
+  const { store, service, momo } = setup({
+    async reply() {
+      started();
+      await modelReleased;
+      return "不应写入已清空会话";
+    },
+  });
+  const messageId = "00000000-0000-4000-8000-000000000007";
+  try {
+    const request = service.submit(job("momo", momo, messageId));
+    await modelStarted;
+    service.invalidateConversation(momo);
+    store.clearConversationById("user-1", momo);
+    release();
+    await assert.rejects(request, /会话已清空/);
+    const snapshot = store.getConversationById("user-1", momo);
+    assert.ok(snapshot);
+    assert.deepEqual(snapshot.messages, []);
+    assert.deepEqual(snapshot.tasks, []);
+  } finally {
+    release();
+    store.close();
+  }
+});
+
 test("reopening a store converts interrupted tasks into retryable failures", () => {
   const directory = mkdtempSync(join(tmpdir(), "let-us-talk-"));
   const databasePath = join(directory, "messages.sqlite");

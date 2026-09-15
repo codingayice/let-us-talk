@@ -72,7 +72,9 @@ export interface ConversationDetails {
   tasks: ChatTask[];
 }
 
-export type ConversationSnapshot = ConversationDetails;
+export interface ConversationSnapshot extends ConversationDetails {
+  summary: ConversationSummary;
+}
 
 export interface ConversationEventBase {
   eventId: string;

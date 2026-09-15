@@ -70,6 +70,23 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     return result;
   }
 
+  function conversationSummary(userId: string, details: { conversation: { id: string; characterId: string; updatedAt: string; status: "active" | "hidden" } }): ConversationSummary {
+    const existing = store.listConversations(userId).find((summary) => summary.id === details.conversation.id);
+    const character = publicCharacter(details.conversation.characterId);
+    if (!character) throw new Error("Character not found");
+    if (existing) {
+      return {
+        id: existing.id,
+        character,
+        lastMessagePreview: formatConversationPreview(character.name, existing.lastMessageRole, existing.lastMessagePreview),
+        lastMessageAt: existing.lastMessageAt,
+        status: existing.status,
+        unread: existing.unread,
+      };
+    }
+    return { id: details.conversation.id, character, lastMessagePreview: "", lastMessageAt: details.conversation.updatedAt, status: details.conversation.status, unread: false };
+  }
+
   app.get("/health", async () => ({ ok: true }));
   app.get("/api/characters", async () => characters.flatMap((character) => {
     const publicValue = publicCharacter(character.id);
@@ -98,7 +115,8 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     const user = await requireUser(request, reply);
     if (!user) return;
     if (!findCharacter(request.params.characterId)) return reply.code(404).send({ error: "Character not found" });
-    return store.getConversation(user.id, request.params.characterId);
+    const conversation = store.getConversation(user.id, request.params.characterId);
+    return { ...conversation, summary: conversationSummary(user.id, conversation) };
   });
 
   app.get<{ Params: { conversationId: string } }>("/api/conversations/by-id/:conversationId", async (request, reply) => {
@@ -106,13 +124,14 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     if (!user) return;
     const conversation = store.getConversationById(user.id, request.params.conversationId);
     if (!conversation) return reply.code(404).send({ error: "Conversation not found" });
-    return conversation;
+    return { ...conversation, summary: conversationSummary(user.id, conversation) };
   });
 
   app.delete<{ Params: { conversationId: string } }>("/api/conversations/by-id/:conversationId", async (request, reply) => {
     const user = await requireUser(request, reply);
     if (!user) return;
     if (!store.getConversationById(user.id, request.params.conversationId)) return reply.code(404).send({ error: "Conversation not found" });
+    chatService.invalidateConversation(request.params.conversationId);
     store.clearConversationById(user.id, request.params.conversationId);
     return { ok: true };
   });
@@ -137,6 +156,8 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     const user = await requireUser(request, reply);
     if (!user) return;
     if (!findCharacter(request.params.characterId)) return reply.code(404).send({ error: "Character not found" });
+    const conversation = store.getConversation(user.id, request.params.characterId);
+    chatService.invalidateConversation(conversation.conversation.id);
     store.clearConversation(user.id, request.params.characterId);
     return { ok: true };
   });

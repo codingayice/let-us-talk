@@ -120,10 +120,14 @@ export function createChatStore(): ChatStateStore {
     },
     applySnapshot(snapshot) {
       const conversation = stateFromSnapshot(snapshot);
+      const summaries = snapshot.summary.lastMessagePreview
+        ? [...state.summaries.filter((summary) => summary.id !== snapshot.summary.id), snapshot.summary].sort(byActivity)
+        : state.summaries;
       publish({
         ...state,
         activeConversationId: snapshot.conversation.id,
         conversations: { ...state.conversations, [snapshot.conversation.id]: conversation },
+        summaries,
       });
     },
     addPendingMessage(conversationId, message) {

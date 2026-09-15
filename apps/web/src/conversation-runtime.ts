@@ -99,7 +99,10 @@ export function createConversationRuntime(options: { api?: ConversationApi; real
             if (hasConnected) {
               const recoveryVersion = selectionVersion;
               void api.snapshotById(active).then((snapshot) => {
-                if (recoveryVersion === selectionVersion && store.getSnapshot().activeConversationId === active) store.applySnapshot(snapshot);
+                if (recoveryVersion === selectionVersion && store.getSnapshot().activeConversationId === active) {
+                  store.applySnapshot(snapshot);
+                  void api.markRead(active).catch(() => undefined);
+                }
               }).catch(() => undefined);
             }
           }
@@ -113,7 +116,7 @@ export function createConversationRuntime(options: { api?: ConversationApi; real
     });
   }
 
-  async function open(snapshotPromise: Promise<ConversationSnapshot>) {
+  async function loadAndActivateConversation(snapshotPromise: Promise<ConversationSnapshot>) {
     const version = ++selectionVersion;
     const snapshot = await snapshotPromise;
     if (stopped || version !== selectionVersion) return;
@@ -144,14 +147,15 @@ export function createConversationRuntime(options: { api?: ConversationApi; real
       started = true;
       connect();
       const summaries = await api.list();
+      if (stopped) return;
       store.setSummaries(summaries);
       if (selectionVersion === 0 && !store.getSnapshot().activeConversationId) await runtime.selectCharacter("momo");
     },
     async selectConversation(conversationId) {
-      await open(api.snapshotById(conversationId));
+      await loadAndActivateConversation(api.snapshotById(conversationId));
     },
     async selectCharacter(characterId) {
-      await open(api.snapshotByCharacter(characterId));
+      await loadAndActivateConversation(api.snapshotByCharacter(characterId));
     },
     async send(content, modelConfig, messageId = crypto.randomUUID()) {
       const active = store.getSnapshot().activeConversationId;
@@ -198,7 +202,7 @@ export function createConversationRuntime(options: { api?: ConversationApi; real
       store.setSummaries(summaries);
     },
     stop() {
-      stopped = false;
+      stopped = true;
       started = false;
       realtime.close();
       store.setConnection("offline");

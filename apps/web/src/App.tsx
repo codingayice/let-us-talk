@@ -103,10 +103,12 @@ export function App() {
   const [conversationMenu, setConversationMenu] = useState<ConversationMenuState | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onModelConfigChange = useCallback((next: ModelConfig | null) => setModelConfig(next), []);
-  const runtime = useMemo<ConversationRuntime | null>(() => authUser ? createConversationRuntime({ realtime: import.meta.env.VITE_REALTIME_TEST_ADAPTER === "http-mock" ? new HttpMockRealtimeChatClient() : undefined, onSessionInvalidated: () => {
+  const realtimeMode = new URLSearchParams(window.location.search).get("realtime");
+  const useHttpMockRealtime = realtimeMode !== "socket" && import.meta.env.VITE_REALTIME_TEST_ADAPTER === "http-mock";
+  const runtime = useMemo<ConversationRuntime | null>(() => authUser ? createConversationRuntime({ realtime: useHttpMockRealtime ? new HttpMockRealtimeChatClient() : undefined, onSessionInvalidated: () => {
     setAuthNotice("你的账号已在其他设备登录，当前设备已退出。");
     setAuthUser(null);
-  } }) : null, [authUser]);
+  } }) : null, [authUser, useHttpMockRealtime]);
   const runtimeState = useSyncExternalStore(
     runtime?.store.subscribe ?? EMPTY_RUNTIME_SUBSCRIBE,
     runtime?.store.getSnapshot ?? EMPTY_RUNTIME_SNAPSHOT,

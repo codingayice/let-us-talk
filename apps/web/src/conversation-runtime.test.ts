@@ -7,6 +7,7 @@ import type { RealtimeChatClient } from "./realtime-client.js";
 function snapshot(messages: ChatMessage[] = []): ConversationSnapshot {
   return {
     conversation: { id: "conversation-momo", characterId: "momo", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", status: "active" },
+    summary: { ...summary, lastMessagePreview: messages.at(-1)?.content ?? "", lastMessageAt: messages.at(-1)?.createdAt ?? "2026-01-01T00:00:00.000Z" },
     messages,
     tasks: [],
   };
@@ -72,10 +73,32 @@ test("reconnect reloads the active conversation snapshot through the runtime sea
     { id: "message-1", role: "user", content: "第一次", createdAt: "2026-01-01T00:00:00.000Z", status: "sent" },
     { id: "message-2", role: "assistant", content: "重连后恢复", createdAt: "2026-01-01T00:01:00.000Z", status: "completed" },
   ]);
+  current.summary = { ...summary, lastMessagePreview: "Momo：重连后恢复", lastMessageAt: "2026-01-01T00:01:00.000Z" };
   realtime.reconnect();
   await new Promise<void>((resolve) => setImmediate(resolve));
 
   assert.deepEqual(runtime.store.getSnapshot().conversations["conversation-momo"].messages.map((message) => message.content), ["第一次", "重连后恢复"]);
+  assert.equal(runtime.store.getSnapshot().summaries[0].lastMessagePreview, "Momo：重连后恢复");
   assert.deepEqual(realtime.joined, ["conversation-momo", "conversation-momo"]);
   runtime.stop();
+});
+
+test("stopping before initial loading prevents stale async state writes", async () => {
+  let resolveList!: (value: ConversationSummary[]) => void;
+  const api: ConversationApi = {
+    list: () => new Promise((resolve) => { resolveList = resolve; }),
+    async snapshotById() { return snapshot(); },
+    async snapshotByCharacter() { return snapshot(); },
+    async markRead() {},
+    async hide() {},
+    async restore() {},
+    async clear() {},
+  };
+  const runtime = createConversationRuntime({ api, realtime: new FakeRealtime() });
+  const started = runtime.start();
+  runtime.stop();
+  resolveList([summary]);
+  await started;
+  assert.equal(runtime.store.getSnapshot().activeConversationId, null);
+  assert.deepEqual(runtime.store.getSnapshot().summaries, []);
 });

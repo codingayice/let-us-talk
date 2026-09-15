@@ -68,7 +68,15 @@ async function mockChatApi(page: Page) {
     if (route.request().method() === "DELETE") {
       histories[characterId] = [];
     }
-    return route.fulfill({ json: { conversation: { id: conversationIds[characterId as keyof typeof conversationIds], characterId, status: "active" }, messages: histories[characterId] ?? [] } });
+    const character = characters.find((item) => item.id === characterId)!;
+    const messages = histories[characterId] ?? [];
+    const lastMessage = messages.at(-1);
+    return route.fulfill({ json: {
+      conversation: { id: conversationIds[characterId as keyof typeof conversationIds], characterId, status: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: lastMessage?.createdAt ?? "2026-01-01T00:00:00.000Z" },
+      summary: { id: conversationIds[characterId as keyof typeof conversationIds], character, lastMessagePreview: lastMessage?.content ?? "", lastMessageAt: lastMessage?.createdAt ?? "2026-01-01T00:00:00.000Z", status: "active", unread: messages.length > 0 && !readCharacters.has(characterId) },
+      messages,
+      tasks: [],
+    } });
   });
   await page.route("**/api/chat", async (route) => {
     const body = route.request().postDataJSON() as { characterId: string; content: string };
