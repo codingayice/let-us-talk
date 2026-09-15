@@ -13,6 +13,7 @@ export default defineConfig({
   webServer: {
     command: "pnpm --filter @let-us-talk/web dev --host 127.0.0.1",
     url: "http://127.0.0.1:5173",
+    env: { VITE_REALTIME_TEST_ADAPTER: "http-mock" },
     reuseExistingServer: !process.env.CI,
   },
 });

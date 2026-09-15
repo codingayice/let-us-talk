@@ -90,7 +90,7 @@ export class ChatService {
     if (task.status === "failed") task = this.store.updateTask(job.userId, task.id, { status: "waiting", error: "" });
 
     callbacks.accepted?.(prepared.userMessage, task);
-    const processingMessage = this.store.updateMessageStatus(job.userId, prepared.userMessage.id, "confirmed");
+    const processingMessage = this.store.updateMessageStatus(job.userId, prepared.userMessage.id, "accepted");
     task = this.store.updateTask(job.userId, task.id, { status: "processing", error: "" });
     callbacks.processing?.(processingMessage, task);
     const context = this.buildContext(details.messages, prepared.userMessage);

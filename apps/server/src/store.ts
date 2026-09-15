@@ -32,6 +32,7 @@ export interface ChatStore {
   markConversationRead(userId: string, conversationId: string): void;
   hideConversation(userId: string, conversationId: string): void;
   restoreConversation(userId: string, conversationId: string): void;
+  clearConversationById(userId: string, conversationId: string): void;
   clearConversation(userId: string, characterId: string): void;
   close(): void;
 }
@@ -85,6 +86,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
     UPDATE messages SET user_id = (SELECT user_id FROM conversations WHERE conversations.id = messages.conversation_id) WHERE user_id IS NULL;
     UPDATE messages SET client_message_id = id WHERE role = 'user' AND client_message_id IS NULL;
     UPDATE messages SET status = CASE role WHEN 'user' THEN 'sent' ELSE 'completed' END WHERE status = 'completed';
+    UPDATE messages SET status = 'accepted' WHERE status = 'confirmed';
     CREATE UNIQUE INDEX IF NOT EXISTS messages_user_client_message_id ON messages(user_id, client_message_id) WHERE client_message_id IS NOT NULL;
   `);
   // A process crash must not leave a task looking permanently active after restart.
@@ -98,6 +100,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
   const hideConversationByIdStatement = database.prepare("UPDATE conversations SET hidden_at = ? WHERE user_id = ? AND id = ?");
   const restoreConversationStatement = database.prepare("UPDATE conversations SET hidden_at = NULL WHERE user_id = ? AND id = ?");
   const deleteMessagesStatement = database.prepare("DELETE FROM messages WHERE conversation_id = (SELECT id FROM conversations WHERE user_id = ? AND character_id = ?)");
+  const deleteMessagesByIdStatement = database.prepare("DELETE FROM messages WHERE conversation_id = (SELECT id FROM conversations WHERE user_id = ? AND id = ?)");
   const resetReadSequenceStatement = database.prepare("UPDATE conversations SET last_read_sequence = 0 WHERE user_id = ? AND character_id = ?");
   const markConversationReadStatement = database.prepare("UPDATE conversations SET last_read_sequence = COALESCE((SELECT MAX(sequence) FROM messages WHERE conversation_id = conversations.id), 0) WHERE user_id = ? AND id = ?");
   const insertMessageStatement = database.prepare("INSERT INTO messages (id, user_id, conversation_id, client_message_id, role, content, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
@@ -153,8 +156,8 @@ export function createStore(databasePath = config.databasePath): ChatStore {
       const conversation = conversationId ? findConversationByIdStatement.get(userId, conversationId) as unknown as ConversationRow | undefined : ensureConversation(userId, characterId);
       if (!conversation || conversation.character_id !== characterId) throw new Error("Conversation not found");
       const now = new Date().toISOString();
-      const userMessage: ChatMessage = { id: crypto.randomUUID(), clientMessageId, role: "user", content, createdAt: now, status: "confirmed" };
-      insertMessageStatement.run(userMessage.id, userId, conversation.id, clientMessageId, "user", content, "confirmed", now);
+      const userMessage: ChatMessage = { id: crypto.randomUUID(), clientMessageId, role: "user", content, createdAt: now, status: "accepted" };
+      insertMessageStatement.run(userMessage.id, userId, conversation.id, clientMessageId, "user", content, "accepted", now);
       updateConversationStatement.run(now, conversation.id);
       const taskId = crypto.randomUUID();
       insertTaskStatement.run(taskId, userId, conversation.id, userMessage.id, now, now);
@@ -199,6 +202,7 @@ export function createStore(databasePath = config.databasePath): ChatStore {
     markConversationRead(userId, conversationId) { markConversationReadStatement.run(userId, conversationId); },
     hideConversation(userId, conversationId) { hideConversationByIdStatement.run(new Date().toISOString(), userId, conversationId); },
     restoreConversation(userId, conversationId) { restoreConversationStatement.run(userId, conversationId); },
+    clearConversationById(userId, conversationId) { deleteMessagesByIdStatement.run(userId, conversationId); },
     clearConversation(userId, characterId) {
       deleteMessagesStatement.run(userId, characterId);
       resetReadSequenceStatement.run(userId, characterId);

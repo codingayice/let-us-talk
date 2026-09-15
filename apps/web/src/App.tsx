@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { Character, ChatMessage, ChatResponse, ChatTask, ConversationSummary } from "@let-us-talk/shared";
-import { io, type Socket } from "socket.io-client";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import type { Character, ChatMessage, ChatTask, ConversationSummary } from "@let-us-talk/shared";
 import { ModelSettings } from "./ModelSettings.js";
 import { readModelConfig, type ModelConfig } from "./model-config.js";
+import { createConversationRuntime, type ConversationRuntime } from "./conversation-runtime.js";
+import { HttpMockRealtimeChatClient } from "./realtime-client.js";
 import {
   Avatar,
   ChatContainer,
@@ -18,30 +19,6 @@ import {
 } from "@chatscope/chat-ui-kit-react";
 
 interface RetryRequest {
-  content: string;
-  messageId: string;
-}
-
-interface RealtimeCompleted {
-  eventId?: string;
-  conversationId: string;
-  messageId: string;
-  userMessage: ChatMessage;
-  assistantMessage: ChatMessage;
-}
-
-interface RealtimeFailed {
-  eventId?: string;
-  conversationId: string;
-  messageId: string;
-  userMessage: ChatMessage;
-  task?: ChatTask;
-  error: string;
-}
-
-interface OutboxItem {
-  characterId: string;
-  conversationId: string;
   content: string;
   messageId: string;
 }
@@ -65,6 +42,10 @@ const fallbackCharacters: Character[] = [
   { id: "nora", name: "Nora", avatar: "☕", tagline: "理性又好奇，什么都愿意聊", systemPrompt: "" },
 ];
 
+const EMPTY_RUNTIME_STATE = { activeConversationId: null, conversations: {}, summaries: [], connection: "offline" as const };
+const EMPTY_RUNTIME_SUBSCRIBE = (_listener: () => void) => () => undefined;
+const EMPTY_RUNTIME_SNAPSHOT = () => EMPTY_RUNTIME_STATE;
+
 function avatarSource(character: Pick<Character, "name" | "avatar">) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="24" fill="#eee5d7"/><text x="48" y="62" text-anchor="middle" font-size="42">${character.avatar}</text></svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
@@ -79,69 +60,8 @@ function userFacingError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function sendRealtimeMessage(socket: Socket, payload: { characterId: string; conversationId: string; content?: string; messageId: string; modelConfig: ModelConfig }, seenEventIds: Set<string>, command: "chat:send" | "chat:retry" = "chat:send") {
-  return new Promise<ChatResponse>((resolve, reject) => {
-    let acknowledged = false;
-    const cleanup = () => {
-      socket.off("chat:completed", onCompleted);
-      socket.off("chat:failed", onFailed);
-      socket.off("disconnect", onDisconnect);
-    };
-    const onCompleted = (event: RealtimeCompleted) => {
-      if (!acknowledged || event.messageId !== payload.messageId) return;
-      if (event.eventId && seenEventIds.has(event.eventId)) return;
-      if (event.eventId) seenEventIds.add(event.eventId);
-      cleanup();
-      resolve({ userMessage: event.userMessage, assistantMessage: event.assistantMessage });
-    };
-    const onFailed = (event: RealtimeFailed) => {
-      if (!acknowledged || event.messageId !== payload.messageId) return;
-      if (event.eventId && seenEventIds.has(event.eventId)) return;
-      if (event.eventId) seenEventIds.add(event.eventId);
-      cleanup();
-      reject(new Error(event.error));
-    };
-    const onDisconnect = () => {
-      cleanup();
-      reject(new Error("网络连接失败，请稍后重试"));
-    };
-    socket.on("chat:completed", onCompleted);
-    socket.on("chat:failed", onFailed);
-    socket.once("disconnect", onDisconnect);
-    socket.emit(command, payload, (acknowledgment: { ok: boolean; error?: string }) => {
-      if (!acknowledgment.ok) {
-        cleanup();
-        reject(new Error(acknowledgment.error ?? "请求失败"));
-        return;
-      }
-      acknowledged = true;
-    });
-  });
-}
-
-function outboxKey(userId: string) {
-  return `let-us-talk:outbox:${userId}`;
-}
-
 function viewPositionKey(userId: string, conversationId: string) {
   return `let-us-talk:view-position:${userId}:${conversationId}`;
-}
-
-function readOutbox(userId: string): OutboxItem[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(outboxKey(userId)) ?? "[]") as unknown;
-    return Array.isArray(parsed) ? parsed as OutboxItem[] : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeOutbox(userId: string, items: OutboxItem[]) {
-  localStorage.setItem(outboxKey(userId), JSON.stringify(items));
-}
-
-function matchesClientMessage(message: ChatMessage, messageId: string) {
-  return message.id === messageId || message.clientMessageId === messageId;
 }
 
 function localizeAuthError(data: { code?: string; message?: string; error?: string }) {
@@ -163,16 +83,10 @@ export function App() {
   const [characters, setCharacters] = useState<Character[]>(fallbackCharacters);
   const [activePanel, setActivePanel] = useState<"conversations" | "contacts" | "settings">("contacts");
   const [modelConfig, setModelConfig] = useState<ModelConfig | null>(() => readModelConfig());
-  const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
-  const [selectedId, setSelectedId] = useState("momo");
-  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [tasks, setTasks] = useState<ChatTask[]>([]);
   const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
   const [loadingConversation, setLoadingConversation] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
+  const [viewErrorMessage, setErrorMessage] = useState("");
   const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
   const [clearing, setClearing] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -187,17 +101,26 @@ export function App() {
   const [passwordError, setPasswordError] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [conversationMenu, setConversationMenu] = useState<ConversationMenuState | null>(null);
-  const selectedIdRef = useRef(selectedId);
-  const selectedConversationIdRef = useRef(selectedConversationId);
-  const socketRef = useRef<Socket | null>(null);
-  const seenEventIdsRef = useRef(new Set<string>());
-  const outboxRef = useRef<OutboxItem[]>([]);
-  const loadedConversationKeyRef = useRef("");
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const readConversationIdsRef = useRef(new Set<string>());
   const onModelConfigChange = useCallback((next: ModelConfig | null) => setModelConfig(next), []);
-  selectedIdRef.current = selectedId;
-  selectedConversationIdRef.current = selectedConversationId;
+  const runtime = useMemo<ConversationRuntime | null>(() => authUser ? createConversationRuntime({ realtime: import.meta.env.VITE_REALTIME_TEST_ADAPTER === "http-mock" ? new HttpMockRealtimeChatClient() : undefined, onSessionInvalidated: () => {
+    setAuthNotice("你的账号已在其他设备登录，当前设备已退出。");
+    setAuthUser(null);
+  } }) : null, [authUser]);
+  const runtimeState = useSyncExternalStore(
+    runtime?.store.subscribe ?? EMPTY_RUNTIME_SUBSCRIBE,
+    runtime?.store.getSnapshot ?? EMPTY_RUNTIME_SNAPSHOT,
+    runtime?.store.getSnapshot ?? EMPTY_RUNTIME_SNAPSHOT,
+  );
+  const selectedConversationId = runtimeState.activeConversationId;
+  const activeConversation = selectedConversationId ? runtimeState.conversations[selectedConversationId] : undefined;
+  const selectedId = activeConversation?.characterId || fallbackCharacters[0].id;
+  const conversationSummaries = runtimeState.summaries;
+  const messages = activeConversation?.messages ?? [];
+  const tasks = activeConversation?.tasks ?? [];
+  const failedTask = tasks.find((task) => task.status === "failed");
+  const sending = Boolean(activeConversation?.pendingMessageIds.length || tasks.some((task) => task.status === "waiting" || task.status === "processing"));
+  const errorMessage = activeConversation?.error ?? runtimeState.connectionError ?? viewErrorMessage;
 
   useEffect(() => {
     if (!conversationMenu) return;
@@ -206,10 +129,7 @@ export function App() {
     return () => document.removeEventListener("pointerdown", close);
   }, [conversationMenu]);
 
-  const selected = useMemo(
-    () => characters.find((character) => character.id === selectedId) ?? fallbackCharacters[0],
-    [characters, selectedId],
-  );
+  const selected = useMemo(() => characters.find((character) => character.id === selectedId) ?? fallbackCharacters[0], [characters, selectedId]);
 
   useEffect(() => {
     void fetch("/api/auth/get-session")
@@ -231,135 +151,13 @@ export function App() {
   }, [authUser]);
 
   useEffect(() => {
-    const socket = socketRef.current;
-    if (!authUser || !socket?.connected || !selectedConversationId) return;
-    socket.emit("conversation:join", { conversationId: selectedConversationId, characterId: selectedId });
-  }, [authUser, selectedConversationId, selectedId]);
-
-  useEffect(() => {
-    if (!authUser) return;
-    void fetch("/api/conversations")
-      .then(async (response) => {
-        if (!response.ok) throw new Error("会话列表加载失败");
-        return response.json() as Promise<{ conversations?: ConversationSummary[] }>;
-      })
-      .then((data) => setConversationSummaries((data.conversations ?? []).map((summary) => readConversationIdsRef.current.has(summary.id) ? { ...summary, unread: false } : summary)))
-      .catch(() => setConversationSummaries([]));
-  }, [authUser]);
-
-  useEffect(() => {
-    if (!authUser) return;
-    outboxRef.current = readOutbox(authUser.id);
-    seenEventIdsRef.current.clear();
-    loadedConversationKeyRef.current = "";
-    readConversationIdsRef.current.clear();
-    setTasks([]);
-  }, [authUser]);
-
-  useEffect(() => {
-    if (!authUser) return;
-    const socket = io({ withCredentials: true });
-    socketRef.current = socket;
-    const recover = () => {
-      const conversationId = selectedConversationIdRef.current;
-      if (!conversationId) return;
-      socket.emit("conversation:join", { conversationId, characterId: selectedIdRef.current });
-      void fetch(`/api/conversations/by-id/${conversationId}`)
-        .then((response) => response.ok ? response.json() as Promise<{ messages?: ChatMessage[]; tasks?: ChatTask[] }> : undefined)
-        .then((data) => {
-          if (data) {
-            setMessages(data.messages ?? []);
-            setTasks(data.tasks ?? []);
-          }
-        })
-        .catch(() => undefined);
-    };
-    const onConversationUpdated = (event: { summary?: ConversationSummary }) => {
-      const summary = event.summary;
-      if (!summary) return;
-      setConversationSummaries((current) => [summary, ...current.filter((item) => item.id !== summary.id)]);
-      if (summary.id === selectedConversationIdRef.current) void markConversationRead(summary.id);
-    };
-    const onSessionInvalidated = () => {
-      socket.close();
-      setAuthNotice("你的账号已在其他设备登录，当前设备已退出。");
-      setAuthUser(null);
-      setMessages([]);
-      setTasks([]);
-    };
-    const onConnectError = (error: Error) => {
-      if (!error.message.includes("请先登录") && !error.message.includes("登录状态无效")) return;
-      onSessionInvalidated();
-    };
-    socket.on("connect", recover);
-    socket.on("conversation:updated", onConversationUpdated);
-    socket.on("auth:session-invalidated", onSessionInvalidated);
-    socket.on("connect_error", onConnectError);
-    if (socket.connected) recover();
-    return () => {
-      socket.off("connect", recover);
-      socket.off("conversation:updated", onConversationUpdated);
-      socket.off("auth:session-invalidated", onSessionInvalidated);
-      socket.off("connect_error", onConnectError);
-      socket.close();
-      if (socketRef.current === socket) socketRef.current = null;
-    };
-  }, [authUser]);
-
-  useEffect(() => {
-    if (!authUser) return;
-    const conversationKey = `${selectedId}:${selectedConversationId ?? "contact"}`;
-    if (loadedConversationKeyRef.current === conversationKey) return;
-    setMessages([]);
-    setErrorMessage("");
-    setRetryRequest(null);
+    if (!runtime) return;
     setLoadingConversation(true);
-    let cancelled = false;
-    const endpoint = selectedConversationId
-      ? `/api/conversations/by-id/${selectedConversationId}`
-      : `/api/conversations/${selectedId}`;
-    void fetch(endpoint)
-      .then(async (response) => {
-        if (!response.ok) throw new Error("历史消息加载失败");
-        return response.json() as Promise<{ conversation?: { id: string; status?: string }; messages?: ChatMessage[]; tasks?: ChatTask[] }>;
-      })
-      .then((data) => {
-        if (data.conversation?.status === "hidden" && data.conversation.id) {
-          return fetch(`/api/conversations/${selectedId}/restore`, { method: "POST" }).then(() => data);
-        }
-        return data;
-      })
-      .then((data) => {
-        if (!cancelled) {
-          loadedConversationKeyRef.current = `${selectedId}:${data.conversation?.id ?? selectedConversationId ?? "contact"}`;
-          setSelectedConversationId(data.conversation?.id ?? selectedConversationId);
-          const serverMessages = data.messages ?? [];
-          const serverTasks = data.tasks ?? [];
-          const reconciledOutbox = outboxRef.current.filter((item) => {
-            const serverMessage = serverMessages.find((message) => matchesClientMessage(message, item.messageId));
-            return !serverMessage || !serverTasks.some((task) => task.userMessageId === serverMessage.id && task.status === "completed");
-          });
-          outboxRef.current = reconciledOutbox;
-          writeOutbox(authUser.id, reconciledOutbox);
-          setMessages([...serverMessages, ...outboxRef.current
-            .filter((item) => item.conversationId === data.conversation?.id && !serverMessages.some((message) => matchesClientMessage(message, item.messageId)))
-            .map((item): ChatMessage => ({ id: item.messageId, clientMessageId: item.messageId, role: "user", content: item.content, createdAt: new Date().toISOString(), status: "failed" }))]);
-          setTasks(serverTasks);
-          if (data.conversation?.id) void markConversationRead(data.conversation.id);
-          const recoverable = outboxRef.current.find((item) => item.conversationId === data.conversation?.id);
-          if (recoverable) setRetryRequest({ content: recoverable.content, messageId: recoverable.messageId });
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setErrorMessage(userFacingError(error, "历史消息加载失败，请稍后重试"));
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingConversation(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [authUser, selectedId, selectedConversationId]);
+    void runtime.start()
+      .catch((error: unknown) => setErrorMessage(userFacingError(error, "会话加载失败，请稍后重试")))
+      .finally(() => setLoadingConversation(false));
+    return () => runtime.stop();
+  }, [runtime]);
 
   useEffect(() => {
     if (!authUser || !selectedConversationId) return;
@@ -379,18 +177,9 @@ export function App() {
     };
   }, [authUser, selectedConversationId, messages.length, loadingConversation]);
 
-  async function refreshConversationSummaries() {
-    const response = await fetch("/api/conversations");
-    if (!response.ok) throw new Error("会话列表加载失败");
-    const data = await response.json() as { conversations?: ConversationSummary[] };
-    setConversationSummaries(data.conversations ?? []);
-  }
-
   async function markConversationRead(conversationId: string) {
-    readConversationIdsRef.current.add(conversationId);
-    setConversationSummaries((current) => current.map((summary) => summary.id === conversationId ? { ...summary, unread: false } : summary));
-    const response = await fetch(`/api/conversations/by-id/${conversationId}/read`, { method: "POST" });
-    if (!response.ok) return;
+    if (!runtime) return;
+    await runtime.markRead(conversationId).catch(() => undefined);
   }
 
   async function copyMessage(message: ChatMessage) {
@@ -406,16 +195,24 @@ export function App() {
   function selectContact(characterId: string) {
     setActivePanel("contacts");
     setMobileChatOpen(true);
-    setSelectedConversationId(null);
-    setSelectedId(characterId);
+    if (!runtime) return;
+    setLoadingConversation(true);
+    setErrorMessage("");
+    void runtime.selectCharacter(characterId)
+      .catch((error: unknown) => setErrorMessage(userFacingError(error, "历史消息加载失败，请稍后重试")))
+      .finally(() => setLoadingConversation(false));
   }
 
   function openConversation(summary: ConversationSummary) {
     setActivePanel("conversations");
     setMobileChatOpen(true);
-    setSelectedConversationId(summary.id);
-    setSelectedId(summary.character.id);
-    void markConversationRead(summary.id);
+    if (!runtime) return;
+    setLoadingConversation(true);
+    setErrorMessage("");
+    void runtime.selectConversation(summary.id)
+      .then(() => markConversationRead(summary.id))
+      .catch((error: unknown) => setErrorMessage(userFacingError(error, "历史消息加载失败，请稍后重试")))
+      .finally(() => setLoadingConversation(false));
   }
 
   function showConversationMenu(event: React.MouseEvent, conversationId: string) {
@@ -437,14 +234,10 @@ export function App() {
   }
 
   async function hideConversation(conversationId: string) {
-    const summary = conversationSummaries.find((item) => item.id === conversationId);
-    if (!summary) return;
-    const response = await fetch(`/api/conversations/${summary.character.id}/hide`, { method: "POST" });
-    if (!response.ok) return;
-    setConversationSummaries((current) => current.filter((item) => item.id !== conversationId));
+    if (!runtime || !conversationSummaries.some((item) => item.id === conversationId)) return;
+    await runtime.hide(conversationId).catch((error: unknown) => setErrorMessage(userFacingError(error, "隐藏会话失败，请稍后重试")));
     setConversationMenu(null);
-    if (selectedConversationIdRef.current === conversationId) {
-      setSelectedConversationId(null);
+    if (selectedConversationId === conversationId) {
       setActivePanel("contacts");
       setMobileChatOpen(false);
     }
@@ -455,20 +248,13 @@ export function App() {
     if (!summary) return;
     setConversationMenu(null);
     if (!window.confirm(`确定清空与 ${summary.character.name} 的全部历史消息吗？`)) return;
-    const response = await fetch(`/api/conversations/${summary.character.id}`, { method: "DELETE" });
-    if (!response.ok) return;
-    await refreshConversationSummaries().catch(() => undefined);
-    if (selectedConversationIdRef.current === conversationId) {
-      setMessages([]);
-      setTasks([]);
-    }
+    if (!runtime) return;
+    await runtime.clear(conversationId).catch((error: unknown) => setErrorMessage(userFacingError(error, "会话清空失败，请稍后重试")));
   }
 
   async function logout() {
     await fetch("/api/auth/sign-out", { method: "POST" });
     setAuthUser(null);
-    setMessages([]);
-    setTasks([]);
   }
 
   function openProfile() {
@@ -534,7 +320,7 @@ export function App() {
 
   async function sendMessage(value: string, messageId: string = crypto.randomUUID(), retryAssistant = false) {
     const content = value.trim();
-    if (!content || sending) return;
+    if (!content || sending || !runtime || !selectedConversationId) return;
 
     const requestModelConfig = modelConfig ?? readModelConfig();
     if (!requestModelConfig) {
@@ -544,75 +330,21 @@ export function App() {
       return;
     }
 
-    const requestCharacterId = selectedId;
-    const requestConversationId = selectedConversationId;
-
     setDraft("");
     setErrorMessage("");
     setRetryRequest(null);
-    setSending(true);
-    const userMessage: ChatMessage = {
-      id: messageId,
-      role: "user",
-      content,
-      createdAt: new Date().toISOString(),
-      status: "pending",
-    };
-    const outboxItem: OutboxItem = {
-      characterId: requestCharacterId,
-      conversationId: requestConversationId ?? "",
-      content,
-      messageId: userMessage.id,
-    };
-    if (!retryAssistant) {
-      outboxRef.current = [...outboxRef.current.filter((item) => item.messageId !== userMessage.id), outboxItem];
-      if (authUser) writeOutbox(authUser.id, outboxRef.current);
-      setMessages((current) => [...current.filter((message) => !matchesClientMessage(message, userMessage.id)), userMessage]);
-    }
-
     try {
-      let data: ChatResponse;
-      const socket = socketRef.current;
-      if (socket?.connected && requestConversationId) {
-        data = await sendRealtimeMessage(socket, { characterId: requestCharacterId, conversationId: requestConversationId, ...(retryAssistant ? {} : { content }), messageId: userMessage.id, modelConfig: requestModelConfig }, seenEventIdsRef.current, retryAssistant ? "chat:retry" : "chat:send");
-      } else {
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ characterId: requestCharacterId, ...(requestConversationId ? { conversationId: requestConversationId } : {}), content, messageId: userMessage.id, modelConfig: requestModelConfig }),
-        });
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ error: "请求失败" }));
-          throw new Error(error.error ?? "请求失败");
-        }
-        data = (await response.json()) as ChatResponse;
-      }
-      outboxRef.current = outboxRef.current.filter((item) => item.messageId !== userMessage.id);
-      if (authUser) writeOutbox(authUser.id, outboxRef.current);
-      void refreshConversationSummaries().then(() => {
-        if (selectedConversationIdRef.current === requestConversationId && requestConversationId) return markConversationRead(requestConversationId);
-        return undefined;
-      }).catch(() => undefined);
-      if (selectedIdRef.current !== requestCharacterId) return;
-      setRetryRequest(null);
-      setMessages((current) => [
-        ...current.filter((message) => !matchesClientMessage(message, userMessage.id)),
-        data.userMessage,
-        data.assistantMessage,
-      ]);
-      setTasks((current) => current.filter((task) => task.userMessageId !== data.userMessage.id && task.userMessageId !== userMessage.id));
-    } catch (error) {
-      if (selectedIdRef.current !== requestCharacterId) return;
       if (retryAssistant) {
-        setErrorMessage(userFacingError(error, "AI 回复重试失败，请稍后重试"));
-        return;
+        const task = tasks.find((item) => item.userMessageId === messageId || messages.some((message) => message.id === item.userMessageId && (message.clientMessageId === messageId || message.id === messageId)));
+        if (!task) throw new Error("找不到待重试的 AI 回复");
+        await runtime.retry(task, requestModelConfig);
+      } else {
+        await runtime.send(content, requestModelConfig, messageId);
       }
-      setMessages((current) => current.map((message) => matchesClientMessage(message, userMessage.id) ? { ...message, status: "failed" } : message));
+    } catch (error) {
+      setErrorMessage(userFacingError(error, retryAssistant ? "AI 回复重试失败，请稍后重试" : "网络连接失败，请稍后重试"));
       setDraft(content);
-      setRetryRequest({ content, messageId: userMessage.id });
-      setErrorMessage(userFacingError(error, "网络连接失败，请稍后重试"));
-    } finally {
-      setSending(false);
+      setRetryRequest({ content, messageId });
     }
   }
 
@@ -620,20 +352,14 @@ export function App() {
     if (sending || loadingConversation || clearing) return;
     if (!window.confirm(`确定清空与 ${selected.name} 的全部历史消息吗？`)) return;
 
-    const requestCharacterId = selectedId;
     setClearing(true);
     setErrorMessage("");
     setRetryRequest(null);
     try {
-      const response = await fetch(`/api/conversations/${requestCharacterId}`, { method: "DELETE" });
-      if (!response.ok) throw new Error("会话清空失败，请稍后重试");
-      if (selectedIdRef.current === requestCharacterId) setMessages([]);
-      if (selectedIdRef.current === requestCharacterId) setTasks([]);
-      void refreshConversationSummaries().catch(() => undefined);
+      if (!runtime || !selectedConversationId) throw new Error("会话尚未加载");
+      await runtime.clear(selectedConversationId);
     } catch (error) {
-      if (selectedIdRef.current === requestCharacterId) {
-        setErrorMessage(userFacingError(error, "会话清空失败，请稍后重试"));
-      }
+      setErrorMessage(userFacingError(error, "会话清空失败，请稍后重试"));
     } finally {
       setClearing(false);
     }
@@ -781,10 +507,10 @@ export function App() {
             {errorMessage && (
               <div className="im-error" role="alert">
                 <span>{errorMessage}</span>
-                {retryRequest && (
+                {(retryRequest || failedTask) && (
                   <button
                     type="button"
-                    onClick={() => void sendMessage(retryRequest.content, retryRequest.messageId)}
+                    onClick={() => retryRequest ? void sendMessage(retryRequest.content, retryRequest.messageId) : failedTask ? retryTask(failedTask) : undefined}
                     disabled={sending}
                   >
                     重试发送
@@ -807,7 +533,7 @@ export function App() {
             {!loadingConversation && tasks.filter((task) => task.status !== "completed").map((task) => {
               const taskMessage = messages.find((message) => message.id === task.userMessageId);
               return (
-                <div className="im-task-state" key={task.id} data-task-id={task.id} role={task.status === "failed" ? "alert" : "status"}>
+                <div className="im-task-state" key={task.id} data-task-id={task.id} role="presentation">
                   <span>{task.status === "waiting" ? "AI 回复排队中…" : task.status === "processing" ? "AI 正在处理中…" : `AI 回复失败：${task.error ?? "请重试"}`}</span>
                   {task.status === "failed" && taskMessage && <button type="button" onClick={() => retryTask(task)} disabled={sending}>重试回复</button>}
                 </div>

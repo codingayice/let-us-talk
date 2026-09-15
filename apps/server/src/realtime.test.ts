@@ -56,10 +56,11 @@ test("REST chat publishes a conversation update to the authenticated realtime cl
   const conversationId = (JSON.parse(created.body) as { conversation: { id: string } }).conversation.id;
   const socket = await connect(url, cookie);
   try {
-    const updated = waitForEvent<{ summary: { id: string; lastMessagePreview: string } }>(socket, "conversation:updated");
+    const updated = waitForEvent<{ conversationId: string; summary: { id: string; lastMessagePreview: string } }>(socket, "conversation:updated");
     const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { conversationId, characterId: "momo", content: "来自 HTTP", modelConfig: testModelConfig } });
     assert.equal(response.statusCode, 200, response.body);
     const event = await updated;
+    assert.equal(event.conversationId, conversationId);
     assert.equal(event.summary.id, conversationId);
     assert.equal(event.summary.lastMessagePreview, "Momo：REST reply to: 来自 HTTP");
   } finally {
@@ -133,6 +134,30 @@ test("chat:send confirms persistence before starting the model and emits a compl
     assert.equal(result.assistantMessage.content, "Fake reply to: 你好");
     const afterReply = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${conversationId}`, headers: { cookie } })).body) as { messages: ChatMessage[] };
     assert.deepEqual(afterReply.messages.map((message) => message.content), ["你好", "Fake reply to: 你好"]);
+  } finally {
+    socket.close();
+    realtime.close();
+    await app.close();
+    store.close();
+  }
+});
+
+test("joining a conversation replaces the previous detail room", async () => {
+  const model: ChatModel = { async reply(input) { return `reply: ${input.messages.at(-1)?.content}`; } };
+  const { app, store, realtime, url } = await setup(model);
+  const cookie = await register(app);
+  const first = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations/momo", headers: { cookie } })).body) as { conversation: { id: string } };
+  const second = JSON.parse((await app.inject({ method: "GET", url: "/api/conversations/loki", headers: { cookie } })).body) as { conversation: { id: string } };
+  const socket = await connect(url, cookie);
+  try {
+    await new Promise<void>((resolve, reject) => socket.emit("conversation:join", { conversationId: first.conversation.id, characterId: "momo" }, (ack: { ok: boolean; error?: string }) => ack.ok ? resolve() : reject(new Error(ack.error))));
+    await new Promise<void>((resolve, reject) => socket.emit("conversation:join", { conversationId: second.conversation.id, characterId: "loki" }, (ack: { ok: boolean; error?: string }) => ack.ok ? resolve() : reject(new Error(ack.error))));
+    let leaked = false;
+    socket.on("chat:accepted", () => { leaked = true; });
+    const response = await app.inject({ method: "POST", url: "/api/chat", headers: { cookie }, payload: { conversationId: first.conversation.id, characterId: "momo", content: "只属于 Momo", modelConfig: testModelConfig } });
+    assert.equal(response.statusCode, 200, response.body);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(leaked, false);
   } finally {
     socket.close();
     realtime.close();

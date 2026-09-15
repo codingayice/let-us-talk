@@ -109,6 +109,30 @@ export function buildApp(dependencies: Partial<AppDependencies> = {}): FastifyIn
     return conversation;
   });
 
+  app.delete<{ Params: { conversationId: string } }>("/api/conversations/by-id/:conversationId", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!store.getConversationById(user.id, request.params.conversationId)) return reply.code(404).send({ error: "Conversation not found" });
+    store.clearConversationById(user.id, request.params.conversationId);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { conversationId: string } }>("/api/conversations/by-id/:conversationId/hide", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!store.getConversationById(user.id, request.params.conversationId)) return reply.code(404).send({ error: "Conversation not found" });
+    store.hideConversation(user.id, request.params.conversationId);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { conversationId: string } }>("/api/conversations/by-id/:conversationId/restore", async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (!user) return;
+    if (!store.getConversationById(user.id, request.params.conversationId)) return reply.code(404).send({ error: "Conversation not found" });
+    store.restoreConversation(user.id, request.params.conversationId);
+    return { ok: true };
+  });
+
   app.delete<{ Params: { characterId: string } }>("/api/conversations/:characterId", async (request, reply) => {
     const user = await requireUser(request, reply);
     if (!user) return;
