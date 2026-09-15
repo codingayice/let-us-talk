@@ -38,11 +38,17 @@ function isRetryable(error: unknown) {
 export class ChatService {
   private readonly queues = new Map<string, Promise<ChatResponse>>();
   private readonly queueDepths = new Map<string, number>();
+  private readonly conversationGenerations = new Map<string, number>();
 
   constructor(private readonly store: ChatStore, private readonly chatModel: ChatModel) {}
 
+  invalidateConversation(conversationId: string) {
+    this.conversationGenerations.set(conversationId, (this.conversationGenerations.get(conversationId) ?? 0) + 1);
+  }
+
   submit(job: ChatJob, callbacks: ChatJobCallbacks = {}) {
     const requestJob = { ...job, modelConfig: job.modelConfig ? { ...job.modelConfig } : undefined };
+    const generation = this.conversationGenerations.get(requestJob.conversationId) ?? 0;
     const existing = this.store.findUserMessage(requestJob.userId, requestJob.clientMessageId);
     const queueDepth = this.queueDepths.get(requestJob.conversationId) ?? 0;
     if (Math.max(queueDepth, this.store.countActiveTasks(requestJob.conversationId)) >= config.maxQueuedTasksPerConversation && !existing) {
@@ -50,7 +56,7 @@ export class ChatService {
     }
     this.queueDepths.set(requestJob.conversationId, queueDepth + 1);
     const previous = this.queues.get(requestJob.conversationId) ?? Promise.resolve(undefined as unknown as ChatResponse);
-    const current = previous.catch(() => undefined as unknown as ChatResponse).then(() => this.process(requestJob, callbacks));
+    const current = previous.catch(() => undefined as unknown as ChatResponse).then(() => this.process(requestJob, callbacks, generation));
     this.queues.set(requestJob.conversationId, current);
     void current.then(
       () => this.releaseQueueSlot(requestJob.conversationId, current),
@@ -66,7 +72,8 @@ export class ChatService {
     else this.queueDepths.delete(conversationId);
   }
 
-  private async process(job: ChatJob, callbacks: ChatJobCallbacks): Promise<ChatResponse> {
+  private async process(job: ChatJob, callbacks: ChatJobCallbacks, generation: number): Promise<ChatResponse> {
+    this.assertConversationGeneration(job.conversationId, generation);
     let prepared: PreparedChat;
     try {
       prepared = this.store.prepareChat(job.userId, job.characterId, job.content, job.clientMessageId, job.conversationId);
@@ -90,7 +97,7 @@ export class ChatService {
     if (task.status === "failed") task = this.store.updateTask(job.userId, task.id, { status: "waiting", error: "" });
 
     callbacks.accepted?.(prepared.userMessage, task);
-    const processingMessage = this.store.updateMessageStatus(job.userId, prepared.userMessage.id, "confirmed");
+    const processingMessage = this.store.updateMessageStatus(job.userId, prepared.userMessage.id, "accepted");
     task = this.store.updateTask(job.userId, task.id, { status: "processing", error: "" });
     callbacks.processing?.(processingMessage, task);
     const context = this.buildContext(details.messages, prepared.userMessage);
@@ -99,6 +106,7 @@ export class ChatService {
     let lastError: unknown;
     const finalAttempt = task.attempts + 2;
     for (let attempt = task.attempts + 1; attempt <= finalAttempt; attempt += 1) {
+      this.assertConversationGeneration(job.conversationId, generation);
       task = this.store.updateTask(job.userId, task.id, { status: "processing", attempts: attempt, error: "" });
       try {
         assistantContent = (await withModelTimeout(this.chatModel.reply({ systemPrompt: job.systemPrompt, messages: context, modelConfig: job.modelConfig }), config.llmTimeoutMs)).trim();
@@ -110,6 +118,8 @@ export class ChatService {
         if (attempt >= finalAttempt || !isRetryable(error)) break;
       }
     }
+
+    this.assertConversationGeneration(job.conversationId, generation);
 
     if (lastError || !assistantContent) {
       const modelError = toModelError(lastError);
@@ -128,6 +138,10 @@ export class ChatService {
     const response = { userMessage, assistantMessage };
     callbacks.completed?.(response, task);
     return response;
+  }
+
+  private assertConversationGeneration(conversationId: string, generation: number) {
+    if ((this.conversationGenerations.get(conversationId) ?? 0) !== generation) throw new ChatServiceError(409, "会话已清空");
   }
 
   private buildContext(messages: ChatMessage[], current: ChatMessage): Array<Pick<ChatMessage, "role" | "content">> {

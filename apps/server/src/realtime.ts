@@ -78,6 +78,13 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
     io.to(room).emit(event, { eventId: crypto.randomUUID(), ...payload });
   }
 
+  function replaceConversationRoom(socket: Socket, conversationId: string) {
+    const previousConversationId = socket.data.activeConversationId as string | undefined;
+    if (previousConversationId && previousConversationId !== conversationId) socket.leave(conversationRoom(previousConversationId));
+    socket.join(conversationRoom(conversationId));
+    socket.data.activeConversationId = conversationId;
+  }
+
   io.use(async (socket, next) => {
     try {
       const session = await dependencies.auth.api.getSession({ headers: socketHeaders(socket) });
@@ -105,7 +112,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
     const details = dependencies.store.getConversationById(userId, command.conversationId);
     if (!details || details.conversation.characterId !== character.id) { acknowledge({ ok: false, error: "Conversation not found" }); return; }
     const room = conversationRoom(command.conversationId);
-    socket.join(room);
+    replaceConversationRoom(socket, command.conversationId);
     let acknowledged = false;
     try {
       await chatService.submit({
@@ -121,6 +128,8 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
           acknowledged = true;
           acknowledge({ ok: true, userMessage, task });
           emitEvent(room, "chat:accepted", { conversationId: command.conversationId, messageId: userMessage.clientMessageId ?? userMessage.id, userMessage, task });
+          const summary = summaryForUser(dependencies.store, userId, command.conversationId);
+          if (summary) emitEvent(userRoom(userId), "conversation:updated", { conversationId: command.conversationId, summary });
         },
         processing: (userMessage, task) => {
           emitEvent(room, "chat:processing", { conversationId: command.conversationId, messageId: userMessage.clientMessageId ?? userMessage.id, task });
@@ -129,7 +138,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
         completed: (response, task) => {
           emitEvent(room, "chat:completed", { conversationId: command.conversationId, messageId: response.userMessage.clientMessageId ?? response.userMessage.id, userMessage: response.userMessage, assistantMessage: response.assistantMessage, task, summary: summaryForUser(dependencies.store, userId, command.conversationId) });
           const summary = summaryForUser(dependencies.store, userId, command.conversationId);
-          if (summary) emitEvent(userRoom(userId), "conversation:updated", { summary });
+          if (summary) emitEvent(userRoom(userId), "conversation:updated", { conversationId: command.conversationId, summary });
           emitEvent(room, "chat:typing", { conversationId: command.conversationId, messageId: response.userMessage.clientMessageId ?? response.userMessage.id, typing: false });
         },
         failed: (userMessage, task, error, category) => {
@@ -167,7 +176,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
       if (!parsed.success) { acknowledge?.({ ok: false, error: "Invalid conversation command" }); return; }
       const details = dependencies.store.getConversationById(socket.data.userId as string, parsed.data.conversationId);
       if (!details || details.conversation.characterId !== parsed.data.characterId) { acknowledge?.({ ok: false, error: "Conversation not found" }); return; }
-      socket.join(conversationRoom(parsed.data.conversationId));
+      replaceConversationRoom(socket, parsed.data.conversationId);
       acknowledge?.({ ok: true });
     });
 
@@ -201,7 +210,7 @@ export function attachRealtimeChat(httpServer: HttpServer, dependencies: Realtim
   if (dependencies.conversationEvents) {
     const onCompleted = ({ userId, conversationId }: { userId: string; conversationId: string }) => {
       const summary = summaryForUser(dependencies.store, userId, conversationId);
-      if (summary) emitEvent(userRoom(userId), "conversation:updated", { summary });
+      if (summary) emitEvent(userRoom(userId), "conversation:updated", { conversationId, summary });
     };
     dependencies.conversationEvents.on("completed", onCompleted);
     io.once("close", () => dependencies.conversationEvents?.off("completed", onCompleted));

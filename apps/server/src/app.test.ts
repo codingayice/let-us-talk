@@ -167,6 +167,10 @@ test("conversation and contact entries resolve to one persistent conversation re
     const hiddenDetails = await app.inject({ method: "GET", url: `/api/conversations/by-id/${contactData.conversation.id}`, headers: { cookie: account.cookie } });
     assert.equal(JSON.parse(hiddenDetails.body).conversation.status, "hidden");
 
+    const restoredById = await app.inject({ method: "POST", url: `/api/conversations/by-id/${contactData.conversation.id}/restore`, headers: { cookie: account.cookie } });
+    assert.equal(restoredById.statusCode, 200, restoredById.body);
+    assert.equal(JSON.parse((await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } })).body).conversations.length, 1);
+
     const restored = await app.inject({
       method: "POST",
       url: "/api/chat",
@@ -176,7 +180,7 @@ test("conversation and contact entries resolve to one persistent conversation re
     assert.equal(restored.statusCode, 200, restored.body);
     const restoredList = await app.inject({ method: "GET", url: "/api/conversations", headers: { cookie: account.cookie } });
     assert.equal(JSON.parse(restoredList.body).conversations[0].id, contactData.conversation.id);
-    const cleared = await app.inject({ method: "DELETE", url: "/api/conversations/momo", headers: { cookie: account.cookie } });
+    const cleared = await app.inject({ method: "DELETE", url: `/api/conversations/by-id/${contactData.conversation.id}`, headers: { cookie: account.cookie } });
     assert.equal(cleared.statusCode, 200, cleared.body);
     const afterClear = JSON.parse((await app.inject({ method: "GET", url: `/api/conversations/by-id/${contactData.conversation.id}`, headers: { cookie: account.cookie } })).body) as { conversation: { id: string; status: string }; messages: ChatMessage[] };
     assert.equal(afterClear.conversation.id, contactData.conversation.id);

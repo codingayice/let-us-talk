@@ -10,9 +10,17 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  webServer: {
-    command: "pnpm --filter @let-us-talk/web dev --host 127.0.0.1",
-    url: "http://127.0.0.1:5173",
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: [
+    {
+      command: "pnpm --filter @let-us-talk/server run e2e",
+      url: "http://127.0.0.1:3001/health",
+      reuseExistingServer: !process.env.CI,
+    },
+    {
+      command: "pnpm --filter @let-us-talk/web dev --host 127.0.0.1",
+      url: "http://127.0.0.1:5173",
+      env: { VITE_REALTIME_TEST_ADAPTER: "http-mock" },
+      reuseExistingServer: !process.env.CI,
+    },
+  ],
 });
