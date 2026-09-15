@@ -9,19 +9,22 @@ import {
   Conversation,
   ConversationHeader,
   ConversationList,
+  EmptyState,
   MainContainer,
   Message,
   MessageInput,
   MessageList,
+  NavRail,
+  SearchField,
   Sidebar,
   TypingIndicator,
-} from "@chatscope/chat-ui-kit-react";
+} from "./im-components.js";
+import { avatarUrl } from "./avatar-provider.js";
 
 interface RetryRequest {
   content: string;
   messageId: string;
 }
-
 interface RealtimeCompleted {
   eventId?: string;
   conversationId: string;
@@ -29,7 +32,6 @@ interface RealtimeCompleted {
   userMessage: ChatMessage;
   assistantMessage: ChatMessage;
 }
-
 interface RealtimeFailed {
   eventId?: string;
   conversationId: string;
@@ -64,11 +66,6 @@ const fallbackCharacters: Character[] = [
   { id: "loki", name: "Loki", avatar: "🦊", tagline: "有点毒舌，但总是站在你这边", systemPrompt: "" },
   { id: "nora", name: "Nora", avatar: "☕", tagline: "理性又好奇，什么都愿意聊", systemPrompt: "" },
 ];
-
-function avatarSource(character: Pick<Character, "name" | "avatar">) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="24" fill="#eee5d7"/><text x="48" y="62" text-anchor="middle" font-size="42">${character.avatar}</text></svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-}
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -161,7 +158,7 @@ export function App() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authNotice, setAuthNotice] = useState("");
   const [characters, setCharacters] = useState<Character[]>(fallbackCharacters);
-  const [activePanel, setActivePanel] = useState<"conversations" | "contacts" | "settings">("contacts");
+  const [activePanel, setActivePanel] = useState<"messages" | "contacts" | "discover" | "me">("messages");
   const [modelConfig, setModelConfig] = useState<ModelConfig | null>(() => readModelConfig());
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState("momo");
@@ -177,6 +174,7 @@ export function App() {
   const [clearing, setClearing] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [characterProfileOpen, setCharacterProfileOpen] = useState(false);
   const [profileName, setProfileName] = useState("");
   const [profileImage, setProfileImage] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
@@ -260,6 +258,7 @@ export function App() {
     if (!authUser) return;
     const socket = io({ withCredentials: true });
     socketRef.current = socket;
+    let hasConnected = false;
     const recover = () => {
       const conversationId = selectedConversationIdRef.current;
       if (!conversationId) return;
@@ -274,6 +273,7 @@ export function App() {
         })
         .catch(() => undefined);
     };
+    const onConnect = () => { hasConnected = true; recover(); };
     const onConversationUpdated = (event: { summary?: ConversationSummary }) => {
       const summary = event.summary;
       if (!summary) return;
@@ -288,16 +288,16 @@ export function App() {
       setTasks([]);
     };
     const onConnectError = (error: Error) => {
-      if (!error.message.includes("请先登录") && !error.message.includes("登录状态无效")) return;
+      if (!hasConnected || (!error.message.includes("请先登录") && !error.message.includes("登录状态无效"))) return;
       onSessionInvalidated();
     };
-    socket.on("connect", recover);
+    socket.on("connect", onConnect);
     socket.on("conversation:updated", onConversationUpdated);
     socket.on("auth:session-invalidated", onSessionInvalidated);
     socket.on("connect_error", onConnectError);
     if (socket.connected) recover();
     return () => {
-      socket.off("connect", recover);
+      socket.off("connect", onConnect);
       socket.off("conversation:updated", onConversationUpdated);
       socket.off("auth:session-invalidated", onSessionInvalidated);
       socket.off("connect_error", onConnectError);
@@ -411,7 +411,7 @@ export function App() {
   }
 
   function openConversation(summary: ConversationSummary) {
-    setActivePanel("conversations");
+    setActivePanel("messages");
     setMobileChatOpen(true);
     setSelectedConversationId(summary.id);
     setSelectedId(summary.character.id);
@@ -539,7 +539,7 @@ export function App() {
     const requestModelConfig = modelConfig ?? readModelConfig();
     if (!requestModelConfig) {
       setErrorMessage("请先前往设置保存模型配置");
-      setActivePanel("settings");
+      setActivePanel("me");
       setMobileChatOpen(false);
       return;
     }
@@ -656,23 +656,7 @@ export function App() {
   return (
     <div className="im-app" data-mobile-chat={mobileChatOpen ? "true" : "false"}>
       <MainContainer responsive className="im-container">
-        <aside className="im-nav" aria-label="主导航">
-          <div className="im-nav-mark" aria-hidden="true">✦</div>
-          <nav>
-            <button type="button" className={activePanel === "conversations" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="会话" aria-pressed={activePanel === "conversations"} data-nav="conversations" onClick={() => { setActivePanel("conversations"); setMobileChatOpen(false); }}>
-              <span aria-hidden="true">◌</span>
-              <small>会话</small>
-            </button>
-            <button type="button" className={activePanel === "contacts" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="联系人" aria-pressed={activePanel === "contacts"} data-nav="contacts" onClick={() => { setActivePanel("contacts"); setMobileChatOpen(false); }}>
-              <span aria-hidden="true">♧</span>
-              <small>联系人</small>
-            </button>
-            <button type="button" className={activePanel === "settings" ? "im-nav-button im-nav-button-active" : "im-nav-button"} aria-label="设置" aria-pressed={activePanel === "settings"} data-nav="settings" onClick={() => { setActivePanel("settings"); setMobileChatOpen(false); }}>
-              <span aria-hidden="true">⚙</span>
-              <small>设置</small>
-            </button>
-          </nav>
-        </aside>
+        <NavRail active={activePanel} onChange={(panel) => { setActivePanel(panel); setMobileChatOpen(false); }} userImage={authUser.image} />
         <Sidebar position="left" scrollable className="im-sidebar">
           <div className="im-brand">
             <div className="im-brand-mark">✦</div>
@@ -681,8 +665,9 @@ export function App() {
                 <span>{authUser.name} · {authUser.email}</span>
               </div>
           </div>
-          {activePanel === "conversations" && (
+          {activePanel === "messages" && (
             <>
+              <SearchField placeholder="搜索会话" />
               <div className="im-section-title">会话</div>
               <ConversationList>
                 {conversationSummaries.map((summary) => (
@@ -703,11 +688,17 @@ export function App() {
                       active={summary.id === selectedConversationId}
                       onClick={() => openConversation(summary)}
                     >
-                      <Avatar name={summary.character.name} src={avatarSource(summary.character)} />
+                      <Avatar name={summary.character.name} src={avatarUrl(summary.character)} />
                       <span className="im-conversation-time">{formatTime(summary.lastMessageAt)}</span>
                     </Conversation>
                     {summary.unread && <span className="im-unread-dot" aria-label="未读消息" />}
                   </div>
+                ))}
+                {characters.filter((character) => !conversationSummaries.some((summary) => summary.character.id === character.id)).map((character) => (
+                  <button key={character.id} type="button" className="im-list-item im-conversation-item" data-character-id={character.id} onClick={() => selectContact(character.id)}>
+                    <Avatar name={character.name} src={avatarUrl(character)} />
+                    <span className="im-list-copy"><strong>{character.name}</strong><span>开始一段新的聊天</span></span>
+                  </button>
                 ))}
               </ConversationList>
               {conversationSummaries.length === 0 && <div className="im-list-empty"><strong>还没有会话</strong><span>从联系人开始一段新的聊天</span></div>}
@@ -715,6 +706,7 @@ export function App() {
           )}
           {activePanel === "contacts" && (
             <>
+              <SearchField placeholder="搜索联系人" />
               <div className="im-section-title">联系人</div>
               <ConversationList>
                 {characters.map((character) => (
@@ -726,13 +718,19 @@ export function App() {
                     data-character-id={character.id}
                     onClick={() => selectContact(character.id)}
                   >
-                    <Avatar name={character.name} src={avatarSource(character)} />
+                    <Avatar name={character.name} src={avatarUrl(character)} />
                   </Conversation>
                 ))}
               </ConversationList>
             </>
           )}
-          {activePanel === "settings" && (
+          {activePanel === "discover" && (
+            <div className="im-discover-panel">
+              <div className="im-section-title">发现</div>
+              <div className="im-discover-card"><div className="im-discover-icon">✦</div><strong>新的连接，正在路上</strong><span>发现功能即将开放，先和你的 AI 朋友聊聊天吧。</span></div>
+            </div>
+          )}
+          {activePanel === "me" && (
             <div className="im-settings-panel">
               <div className="im-section-title">设置</div>
               <div className="im-settings-user"><strong>{authUser.name}</strong><span>{authUser.email}</span></div>
@@ -753,12 +751,21 @@ export function App() {
           </div>
         </Sidebar>
 
+        {activePanel === "discover" ? (
+          <section className="im-content-page"><EmptyState title="发现功能即将开放" detail="这里会成为你探索新内容和新连接的地方。" icon="⌕" /></section>
+        ) : activePanel === "me" ? (
+          <section className="im-content-page im-me-content"><div className="im-page-heading"><span className="im-dialog-kicker">YOUR SPACE</span><h1>我的</h1><p>管理你的账号与聊天偏好</p></div><div className="im-profile-card"><Avatar name={authUser.name} src={authUser.image} size="lg" /><div><strong>{authUser.name}</strong><span>{authUser.email}</span></div><button type="button" className="im-secondary-submit" onClick={openProfile}>编辑资料</button></div><div className="im-preference-grid"><button type="button" onClick={openPasswordManagement}><strong>密码管理</strong><span>更新账号安全设置</span></button><button type="button" onClick={() => setAboutOpen(true)}><strong>关于与说明</strong><span>了解 Let Us Talk</span></button></div></section>
+        ) : (
         <ChatContainer className="im-chat-container">
           <ConversationHeader>
-            <Avatar name={selected.name} src={avatarSource(selected)} status="available" />
+            <Avatar name={selected.name} src={avatarUrl(selected)} status="available" />
             <ConversationHeader.Content userName={selected.name} info={selected.tagline} />
             <ConversationHeader.Actions>
               <button type="button" className="im-mobile-back" aria-label="返回列表" onClick={() => setMobileChatOpen(false)}>‹</button>
+              <button type="button" className="im-icon-button" aria-label="语音通话（暂未开放）" disabled>⌕</button>
+              <button type="button" className="im-icon-button" aria-label="视频通话（暂未开放）" disabled>▣</button>
+              <button type="button" className="im-icon-button" aria-label="查看好友资料" onClick={() => setCharacterProfileOpen(true)}>⌁</button>
+              <button type="button" className="im-icon-button" aria-label="更多操作" onClick={() => selectedConversationId && setConversationMenu({ conversationId: selectedConversationId, x: Math.max(12, window.innerWidth - 210), y: 86 })}>⋯</button>
               <button type="button" className="im-clear-button" onClick={() => void logout()}>退出登录</button>
               <button
                 type="button"
@@ -815,13 +822,13 @@ export function App() {
             })}
             {!loadingConversation && messages.length === 0 && (
               <div className="im-empty-state">
-                <img src={avatarSource(selected)} alt="" />
+                <img src={avatarUrl(selected)} alt="" />
                 <strong>开始和 {selected.name} 聊天</strong>
                 <span>{selected.tagline}</span>
               </div>
             )}
             {messages.filter((message) => message.content).map((message) => (
-              <div className="im-message-row" key={message.id}>
+              <div className={`im-message-row ${message.role === "user" ? "im-message-user" : "im-message-assistant"}`} key={message.id}>
                 <Message
                   model={{
                     message: message.content,
@@ -848,11 +855,24 @@ export function App() {
             autoFocus
           />
         </ChatContainer>
+        )}
       </MainContainer>
       {conversationMenu && (
         <div className="im-context-menu" role="menu" style={{ left: conversationMenu.x, top: conversationMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+          <button type="button" role="menuitem" onClick={() => { setConversationMenu(null); setCharacterProfileOpen(true); }}>查看好友资料</button>
           <button type="button" role="menuitem" onClick={() => void hideConversation(conversationMenu.conversationId)}>隐藏会话</button>
           <button type="button" role="menuitem" onClick={() => void clearConversationById(conversationMenu.conversationId)}>清空历史</button>
+          <button type="button" role="menuitem" disabled>置顶（暂未开放）</button>
+          <button type="button" role="menuitem" disabled>免打扰（暂未开放）</button>
+          <button type="button" role="menuitem" disabled>举报（暂未开放）</button>
+        </div>
+      )}
+      {characterProfileOpen && (
+        <div className="im-modal-backdrop" role="presentation">
+          <section className="im-about-dialog im-character-profile" role="dialog" aria-modal="true" aria-labelledby="character-profile-title">
+            <div className="im-about-heading"><div><span className="im-dialog-kicker">FRIEND PROFILE</span><h2 id="character-profile-title">好友资料</h2></div><button type="button" aria-label="关闭好友资料" onClick={() => setCharacterProfileOpen(false)}>×</button></div>
+            <div className="im-character-profile-body"><img src={avatarUrl(selected)} alt={`${selected.name}头像`} /><h3>{selected.name}</h3><p>{selected.tagline}</p><div className="im-tags"><span>善于倾听</span><span>随时在线</span><span>AI 伙伴</span></div></div>
+          </section>
         </div>
       )}
       {aboutOpen && (

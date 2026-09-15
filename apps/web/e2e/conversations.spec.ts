@@ -102,9 +102,14 @@ test("authenticated shell exposes conversations, contacts and settings as three 
   await mockChatApi(page);
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "会话", exact: true })).toHaveAttribute("aria-pressed", "false");
-  await expect(page.getByRole("button", { name: "联系人", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("button", { name: "设置", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "消息", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "联系人", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("button", { name: "我的", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "发现", exact: true }).click();
+  await expect(page.getByText("发现功能即将开放")).toBeVisible();
+  await page.getByRole("button", { name: "我的", exact: true }).click();
+  await expect(page.getByText("管理你的账号与聊天偏好")).toBeVisible();
+  await page.getByRole("button", { name: "消息", exact: true }).click();
 
   await page.getByRole("button", { name: "联系人", exact: true }).click();
   await page.locator('[data-character-id="momo"]').click();
@@ -113,7 +118,7 @@ test("authenticated shell exposes conversations, contacts and settings as three 
   await page.locator(".cs-button--send").click();
   await expect(page.getByText("momo 回复")).toBeVisible();
 
-  await page.getByRole("button", { name: "会话", exact: true }).click();
+  await page.getByRole("button", { name: "消息", exact: true }).click();
   const conversation = page.locator('[data-conversation-id]').first();
   await expect(conversation).toBeVisible();
   const conversationId = await conversation.getAttribute("data-conversation-id");
@@ -121,7 +126,7 @@ test("authenticated shell exposes conversations, contacts and settings as three 
   await conversation.click();
   await expect(page.getByText("从联系人进入")).toBeVisible();
 
-  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "我的", exact: true }).click();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "账号资料" })).toBeVisible();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "密码管理" })).toBeVisible();
   await expect(page.locator(".im-settings-panel").getByRole("button", { name: "关于与说明" })).toBeVisible();
@@ -136,7 +141,7 @@ test("model settings save, restore, clear, and test unsaved values without chat 
     await route.fulfill({ json: { ok: true, latencyMs: 7 } });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "我的", exact: true }).click();
   await expect(page.getByText("已配置")).toBeVisible();
   await expect(page.getByLabel("API Key")).toHaveAttribute("type", "password");
   await page.getByRole("button", { name: "显示" }).click();
@@ -153,7 +158,7 @@ test("model settings save, restore, clear, and test unsaved values without chat 
   await page.getByRole("button", { name: "保存配置" }).click();
   await expect(page.getByText("配置已保存到当前浏览器")).toBeVisible();
   await page.reload();
-  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "我的", exact: true }).click();
   await expect(page.getByLabel("Base URL")).toHaveValue("https://unsaved.example/custom");
   await page.getByRole("button", { name: "清除配置" }).click();
   await expect(page.getByText("已清除本地模型配置")).toBeVisible();
@@ -179,7 +184,7 @@ test("sending without a local model configuration is blocked before chat history
   await editor.fill("未配置时不应发送");
   await page.locator(".cs-button--send").click();
   await expect(page.getByRole("alert")).toContainText("请先前往设置保存模型配置");
-  await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "我的", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".im-model-settings")).toBeVisible();
   expect(chatRequests).toBe(0);
   await expect(page.getByText("未配置", { exact: true })).toBeVisible();
@@ -359,7 +364,7 @@ test("auth form uses custom validation and Chinese login errors", async ({ page 
 test("conversation summaries show unread dots and opening a conversation clears the dot", async ({ page }) => {
   await mockChatApi(page);
   await page.goto("/");
-  await page.getByRole("button", { name: "会话", exact: true }).click();
+  await page.getByRole("button", { name: "消息", exact: true }).click();
   await expect(page.locator('[aria-label="未读消息"]')).toHaveCount(1);
   await page.locator('[data-conversation-id="00000000-0000-4000-8000-000000000002"]').click();
   await expect(page.locator('[aria-label="未读消息"]')).toHaveCount(0);
@@ -368,7 +373,7 @@ test("conversation summaries show unread dots and opening a conversation clears 
 test("desktop context menu hides a conversation and contact selection restores its history", async ({ page }) => {
   await mockChatApi(page);
   await page.goto("/");
-  await page.getByRole("button", { name: "会话", exact: true }).click();
+  await page.getByRole("button", { name: "消息", exact: true }).click();
   const conversation = page.locator('[data-conversation-id="00000000-0000-4000-8000-000000000001"]');
   await conversation.click({ button: "right" });
   await expect(page.getByRole("menu")).toBeVisible();

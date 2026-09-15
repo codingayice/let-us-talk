@@ -8,8 +8,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
-    "@chatscope/chat-ui-kit-react": "^2.1.1",
-    "@chatscope/chat-ui-kit-styles": "^1.4.0",
+    "@fontsource-variable/inter": "^5.2.8",
     "@let-us-talk/shared": "workspace:*",
     "@vitejs/plugin-react": "^5.0.4",
     "react": "^19.1.1",
